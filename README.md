@@ -9,6 +9,9 @@ The Simple SIP Honeypot Server is an easy-to-use script created for cybersecurit
 - **Detailed Logging**: Each SIP request is logged, providing insights for security analysis.
 - **Real-time Interaction**: Responds to SIP requests, simulating a live SIP server environment.
 - **Educational Tool**: An excellent resource for learning about SIP vulnerabilities and SIP-based attacks.
+- **Raw Payload Telemetry**: Logs bounded raw UDP payload bytes (hex + \x format) with SHA256 to help identify malformed probes and potential zero-days.
+- **Configurable SIP Fingerprint**: Set the `Server` header via a `--user-agent` CLI argument to emulate common SIP stacks and devices.
+- **More Realistic SIP Behavior**: Implements common response patterns (e.g., INVITE flow, OPTIONS OK, REGISTER challenge/accept) and basic retransmit handling.
 
 ## Requirements
 - Python 3.x
@@ -29,12 +32,14 @@ Execute the script with optional arguments for host and port. Defaults to 0.0.0.
 
 
 ```bash
-python3 sip.py --host 0.0.0.0 --port 5060
+python3 sip.py --host 0.0.0.0 --port 5060 --user-agent "Cisco/SPA8000-6.1.5"
 ```
 
 ## Logging
 
 All SIP interactions are logged in sip_honeypot.log for further analysis and research.
+
+In addition to parsed SIP headers, the honeypot logs bounded raw UDP payload telemetry (length, SHA256, and hex/byte-prefix) to help detect malformed packets and unusual payload shapes during mass-scans.
 
 ## Simple SIP Honeypot In Action
 
