@@ -1,0 +1,4 @@
+-r requirements.txt
+-r web/requirements.txt
+pytest>=8
+black>=24

@@ -1,0 +1,75 @@
+services:
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./db/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u root -p\"$$MYSQL_ROOT_PASSWORD\" --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    restart: unless-stopped
+
+  honeypot:
+    build:
+      context: .
+      dockerfile: docker/honeypot.Dockerfile
+    environment:
+      SIP_HOST: 0.0.0.0
+      SIP_PORT: "5060"
+      SIP_USER_AGENT: ${SIP_USER_AGENT:-FRITZ!OS 1.0}
+      SIP_LOG_FILE: /app/logs/sip_honeypot.log
+      SIP_LOG_STDOUT: "true"
+      METRICS_ENABLED: "true"
+      MYSQL_HOST: mysql
+      MYSQL_PORT: "3306"
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      METRICS_QUEUE_SIZE: ${METRICS_QUEUE_SIZE:-10000}
+      DO_BLOCK_ENABLED: ${DO_BLOCK_ENABLED:-false}
+      DO_API_TOKEN: ${DO_API_TOKEN:-}
+      DO_FIREWALL_ID: ${DO_FIREWALL_ID:-}
+      DO_API_BASE_URL: ${DO_API_BASE_URL:-https://api.digitalocean.com}
+      DO_API_TIMEOUT_SECONDS: ${DO_API_TIMEOUT_SECONDS:-10}
+      DO_NEVER_BLOCK: ${DO_NEVER_BLOCK:-}
+      DO_RETRY_INTERVAL_SECONDS: ${DO_RETRY_INTERVAL_SECONDS:-300}
+      DO_FAILURE_COOLDOWN_SECONDS: ${DO_FAILURE_COOLDOWN_SECONDS:-60}
+      DO_MAX_BLOCKED_IPS: ${DO_MAX_BLOCKED_IPS:-1000}
+    ports:
+      - "${SIP_PORT:-5060}:5060/udp"
+    volumes:
+      - honeypot_logs:/app/logs
+    depends_on:
+      mysql:
+        condition: service_healthy
+    restart: unless-stopped
+
+  web:
+    build:
+      context: .
+      dockerfile: docker/web.Dockerfile
+    environment:
+      MYSQL_HOST: mysql
+      MYSQL_PORT: "3306"
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      WEB_PORT: "8080"
+    ports:
+      - "${WEB_BIND_HOST:-127.0.0.1}:${WEB_PORT:-8080}:8080"
+    depends_on:
+      mysql:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  mysql_data:
+  honeypot_logs:

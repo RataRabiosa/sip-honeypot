@@ -1,0 +1,10 @@
+.env
+.git
+.claude
+*.log
+__pycache__
+.venv
+venv
+tests
+PoC.png
+README.md

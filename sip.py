@@ -4,9 +4,11 @@ import argparse
 import hashlib
 import time
 import binascii
+import sys
 from twisted.python import log
 from twisted.internet import reactor, protocol, task
 from twisted.protocols.sip import Base, Response
+from metrics.config import ConfigError, load_settings
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
 
@@ -40,11 +42,13 @@ class SimpleSIPProtocol(Base):
     MAX_RAW_LOG_BYTES = 512
     TX_CACHE_TTL = 30.0
 
-    def __init__(self, user_agent=None):
+    def __init__(self, user_agent=None, metrics=None):
+        Base.__init__(self)
         self.user_agent = str(user_agent) if user_agent is not None else "FRITZ!OS 1.0"
         self._tx_cache = {}
         self._gc = None
         self._cur_dat = None
+        self.metrics = metrics
 
     def startProtocol(self):
         self._gc = task.LoopingCall(self._gc_states)
@@ -91,6 +95,18 @@ class SimpleSIPProtocol(Base):
                 self.transport.write(pkt, address)
             except Exception:
                 pass
+        finally:
+            # Twisted's MessagesParser is shared and stateful across datagrams.
+            # If dataDone() raised (e.g. Content-Length longer than the body
+            # actually present), the parser can be left mid-body, causing the
+            # next unrelated datagram's bytes to be consumed as "more body" of
+            # the stale message. Force a reset after every datagram, success
+            # or failure, so no state leaks between datagrams/addresses.
+            try:
+                self.parser.reset()
+                self.messages[:] = []
+            except Exception:
+                pass
 
     def _raw_log(self, data, address, parse_error=""):
         try:
@@ -115,7 +131,30 @@ class SimpleSIPProtocol(Base):
             if value is not None:
                 logs[key.upper()] = ", ".join(value)
         log.msg(logs)
+        if self.metrics is not None:
+            try:
+                self.metrics.submit(self._metrics_event(request, addr, dst_host, dst_port))
+            except Exception:
+                pass
         self.simulateResponse(request, addr)
+
+    def _metrics_event(self, request, addr, dst_host, dst_port):
+        return {
+            "ts": time.time(),
+            "src_ip": str(addr[0]),
+            "src_port": int(addr[1]),
+            "dst_host": str(dst_host),
+            "dst_port": int(dst_port),
+            "method": self._b2s(getattr(request, "method", "")).upper().strip() or "UNKNOWN",
+            "user_agent": self._get_header_first(request, b"user-agent", "") or None,
+            "from_uri": self._from(request) or None,
+            "to_uri": self._to(request) or None,
+            "call_id": (
+                self._get_header_first(request, b"call-id", "")
+                or self._get_header_first(request, b"i", "")
+            ).strip()
+            or None,
+        }
 
     def simulateResponse(self, request, addr):
         delay = random.uniform(0.1, 1.0)
@@ -376,20 +415,69 @@ class SimpleSIPFactory(protocol.Factory):
 
 
 def main():
+    try:
+        settings = load_settings(script_dir)
+    except ConfigError as e:
+        print(f"CONFIG ERROR: {e}", file=sys.stderr)
+        sys.exit(2)
+
     parser = argparse.ArgumentParser(description="Run a simple SIP honeypot server.")
-    parser.add_argument("--host", type=str, default="0.0.0.0", help="Host to bind the SIP server to.")
-    parser.add_argument("--port", type=int, default=5060, help="Port to bind the SIP server to.")
-    parser.add_argument("--user-agent", type=str, default="FRITZ!OS 1.0")
+    parser.add_argument("--host", type=str, default=settings.sip_host, help="Host to bind the SIP server to.")
+    parser.add_argument("--port", type=int, default=settings.sip_port, help="Port to bind the SIP server to.")
+    parser.add_argument("--user-agent", type=str, default=settings.sip_user_agent)
     args = parser.parse_args()
 
-    LOG_FILE_PATH = os.path.join(script_dir, "sip_honeypot.log")
+    LOG_FILE_PATH = settings.sip_log_file
     print(f"SIP HONEYPOT ACTIVE ON HOST: {args.host}, PORT: {args.port}")
     print(f"ALL SIP requests will be logged in: {LOG_FILE_PATH}")
 
     log_observer = log.FileLogObserver(open(LOG_FILE_PATH, "a"))
     log.startLoggingWithObserver(log_observer.emit, setStdout=False)
 
-    sip_protocol = SimpleSIPProtocol(user_agent=args.user_agent)
+    if settings.sip_log_stdout:
+        stdout_observer = log.FileLogObserver(sys.stdout)
+        log.addObserver(stdout_observer.emit)
+
+    metrics = None
+    if settings.metrics_enabled:
+        from metrics.db import MetricsDB
+        from metrics.worker import MetricsWorker
+
+        db = MetricsDB(
+            settings.mysql_host,
+            settings.mysql_port,
+            settings.mysql_user,
+            settings.mysql_password,
+            settings.mysql_database,
+        )
+
+        firewall = None
+        if settings.do_block_enabled:
+            from metrics.dofirewall import DOFirewallClient
+
+            firewall = DOFirewallClient(
+                settings.do_api_token,
+                settings.do_firewall_id,
+                base_url=settings.do_api_base_url,
+                timeout=settings.do_api_timeout,
+            )
+
+        worker = MetricsWorker(settings, db, firewall, log_fn=lambda m: reactor.callFromThread(log.msg, m))
+        worker.start()
+        reactor.addSystemEventTrigger("before", "shutdown", worker.stop)
+        metrics = worker
+
+        print(
+            f"METRICS: enabled -> mysql://{settings.mysql_user}@{settings.mysql_host}:{settings.mysql_port}/{settings.mysql_database}"
+        )
+        if settings.do_block_enabled:
+            print(f"DO BLOCK: enabled (firewall {settings.do_firewall_id})")
+        else:
+            print("DO BLOCK: disabled")
+    else:
+        print("METRICS: disabled (METRICS_ENABLED not set)")
+
+    sip_protocol = SimpleSIPProtocol(user_agent=args.user_agent, metrics=metrics)
     reactor.listenUDP(args.port, sip_protocol, interface=args.host)
     reactor.run()
 
