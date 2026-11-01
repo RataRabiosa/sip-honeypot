@@ -1,4 +1,5 @@
 import datetime
+import hmac
 import os
 
 import pymysql
@@ -9,6 +10,12 @@ from flask import Flask, jsonify, render_template, request
 from web.queries import dashboard_data
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _get_bool(raw, default: bool) -> bool:
+    if raw is None:
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
 
 
 def _empty_data(hours: int) -> dict:
@@ -54,7 +61,34 @@ def create_app() -> Flask:
     mysql_database = os.environ.get("MYSQL_DATABASE", "sip_honeypot")
     mysql_password = os.environ.get("MYSQL_PASSWORD", "")
 
+    basic_auth_enabled = _get_bool(os.environ.get("WEB_BASIC_AUTH_ENABLED"), False)
+    basic_auth_username = os.environ.get("WEB_BASIC_AUTH_USERNAME")
+    basic_auth_password = os.environ.get("WEB_BASIC_AUTH_PASSWORD")
+    if basic_auth_enabled and (not basic_auth_username or not basic_auth_password):
+        raise RuntimeError(
+            "WEB_BASIC_AUTH_USERNAME and WEB_BASIC_AUTH_PASSWORD must be set when WEB_BASIC_AUTH_ENABLED is true"
+        )
+
     app = Flask(__name__)
+
+    if basic_auth_enabled:
+
+        @app.before_request
+        def _require_basic_auth():
+            auth = request.authorization
+            valid = (
+                auth is not None
+                and auth.username is not None
+                and auth.password is not None
+                and hmac.compare_digest(auth.username.encode("utf-8"), basic_auth_username.encode("utf-8"))
+                and hmac.compare_digest(auth.password.encode("utf-8"), basic_auth_password.encode("utf-8"))
+            )
+            if not valid:
+                return (
+                    "Authentication required",
+                    401,
+                    {"WWW-Authenticate": 'Basic realm="SIP Honeypot Dashboard"'},
+                )
 
     def _connect():
         return pymysql.connect(

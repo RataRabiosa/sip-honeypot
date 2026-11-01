@@ -97,6 +97,7 @@ def app_with_fake_db(monkeypatch):
     monkeypatch.setenv("MYSQL_USER", "fake-user")
     monkeypatch.setenv("MYSQL_PASSWORD", "fake-pass")
     monkeypatch.setenv("MYSQL_DATABASE", "fake-db")
+    monkeypatch.setenv("WEB_BASIC_AUTH_ENABLED", "false")
     app = create_app()
     conn = FakeConnection()
     app.config["DB_CONNECT"] = lambda: conn
@@ -138,6 +139,7 @@ def test_index_shows_error_banner_on_db_error(monkeypatch):
     monkeypatch.setenv("MYSQL_USER", "fake-user")
     monkeypatch.setenv("MYSQL_PASSWORD", "fake-pass")
     monkeypatch.setenv("MYSQL_DATABASE", "fake-db")
+    monkeypatch.setenv("WEB_BASIC_AUTH_ENABLED", "false")
     app = create_app()
 
     def _raise():
@@ -163,6 +165,7 @@ def test_healthz_failure(monkeypatch):
     monkeypatch.setenv("MYSQL_USER", "fake-user")
     monkeypatch.setenv("MYSQL_PASSWORD", "fake-pass")
     monkeypatch.setenv("MYSQL_DATABASE", "fake-db")
+    monkeypatch.setenv("WEB_BASIC_AUTH_ENABLED", "false")
     app = create_app()
 
     def _raise():
@@ -174,3 +177,85 @@ def test_healthz_failure(monkeypatch):
     assert resp.status_code == 503
     body = resp.get_json()
     assert body["ok"] is False
+
+
+def test_index_and_healthz_work_without_auth_header_when_auth_disabled(app_with_fake_db):
+    app, conn = app_with_fake_db
+    client = app.test_client()
+    assert client.get("/").status_code == 200
+    assert client.get("/healthz").status_code == 200
+
+
+@pytest.fixture
+def app_with_fake_db_and_auth(monkeypatch):
+    monkeypatch.setenv("MYSQL_HOST", "fake-host")
+    monkeypatch.setenv("MYSQL_USER", "fake-user")
+    monkeypatch.setenv("MYSQL_PASSWORD", "fake-pass")
+    monkeypatch.setenv("MYSQL_DATABASE", "fake-db")
+    monkeypatch.setenv("WEB_BASIC_AUTH_ENABLED", "true")
+    monkeypatch.setenv("WEB_BASIC_AUTH_USERNAME", "admin")
+    monkeypatch.setenv("WEB_BASIC_AUTH_PASSWORD", "secret-pass")
+    app = create_app()
+    conn = FakeConnection()
+    app.config["DB_CONNECT"] = lambda: conn
+    return app, conn
+
+
+def test_index_and_healthz_with_correct_credentials_return_200(app_with_fake_db_and_auth):
+    app, conn = app_with_fake_db_and_auth
+    client = app.test_client()
+    resp = client.get("/", auth=("admin", "secret-pass"))
+    assert resp.status_code == 200
+    resp = client.get("/healthz", auth=("admin", "secret-pass"))
+    assert resp.status_code == 200
+    assert resp.get_json() == {"ok": True}
+
+
+def test_index_and_healthz_without_auth_header_return_401(app_with_fake_db_and_auth):
+    app, conn = app_with_fake_db_and_auth
+    client = app.test_client()
+    resp = client.get("/")
+    assert resp.status_code == 401
+    assert "Basic" in resp.headers.get("WWW-Authenticate", "")
+
+    resp = client.get("/healthz")
+    assert resp.status_code == 401
+    assert "Basic" in resp.headers.get("WWW-Authenticate", "")
+
+
+def test_index_and_healthz_with_wrong_credentials_return_401(app_with_fake_db_and_auth):
+    app, conn = app_with_fake_db_and_auth
+    client = app.test_client()
+    resp = client.get("/", auth=("admin", "wrong-pass"))
+    assert resp.status_code == 401
+
+    resp = client.get("/healthz", auth=("wrong-user", "secret-pass"))
+    assert resp.status_code == 401
+
+
+def test_create_app_raises_when_auth_enabled_without_username(monkeypatch):
+    monkeypatch.setenv("MYSQL_HOST", "fake-host")
+    monkeypatch.setenv("MYSQL_USER", "fake-user")
+    monkeypatch.setenv("MYSQL_PASSWORD", "fake-pass")
+    monkeypatch.setenv("MYSQL_DATABASE", "fake-db")
+    monkeypatch.setenv("WEB_BASIC_AUTH_ENABLED", "true")
+    # Explicitly set to an empty string (rather than delenv) so this test does not
+    # depend on whether a local .env file happens to provide a fallback value.
+    monkeypatch.setenv("WEB_BASIC_AUTH_USERNAME", "")
+    monkeypatch.setenv("WEB_BASIC_AUTH_PASSWORD", "secret-pass")
+    with pytest.raises(RuntimeError):
+        create_app()
+
+
+def test_create_app_raises_when_auth_enabled_without_password(monkeypatch):
+    monkeypatch.setenv("MYSQL_HOST", "fake-host")
+    monkeypatch.setenv("MYSQL_USER", "fake-user")
+    monkeypatch.setenv("MYSQL_PASSWORD", "fake-pass")
+    monkeypatch.setenv("MYSQL_DATABASE", "fake-db")
+    monkeypatch.setenv("WEB_BASIC_AUTH_ENABLED", "true")
+    monkeypatch.setenv("WEB_BASIC_AUTH_USERNAME", "admin")
+    # Explicitly set to an empty string (rather than delenv) so this test does not
+    # depend on whether a local .env file happens to provide a fallback value.
+    monkeypatch.setenv("WEB_BASIC_AUTH_PASSWORD", "")
+    with pytest.raises(RuntimeError):
+        create_app()

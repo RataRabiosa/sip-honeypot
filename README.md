@@ -68,6 +68,9 @@ All variables are documented with comments in `.env.example`. Summary:
 | `DO_MAX_BLOCKED_IPS` | `1000` | Local safety cap on the number of IPs this honeypot will block via the API. |
 | `WEB_PORT` | `8080` | Port the dashboard listens on / is published as. |
 | `WEB_BIND_HOST` | `127.0.0.1` | Host interface the dashboard port is published on. |
+| `WEB_BASIC_AUTH_ENABLED` | `false` | Enables HTTP Basic Auth on the dashboard (additional layer, off by default). |
+| `WEB_BASIC_AUTH_USERNAME` | — | Username required for Basic Auth. Required if `WEB_BASIC_AUTH_ENABLED=true`. |
+| `WEB_BASIC_AUTH_PASSWORD` | — | Password required for Basic Auth. Required if `WEB_BASIC_AUTH_ENABLED=true`. Keep secret. |
 
 ## Installation (standalone, no Docker/metrics)
 
@@ -102,6 +105,7 @@ When `METRICS_ENABLED=true`, a small Flask dashboard (`web/`) reads from the met
 
 - Reach it at `http://127.0.0.1:8080/` (or whatever `WEB_PORT` you configured) after `docker compose up -d`.
 - **The dashboard has no authentication and is bound to `127.0.0.1` (loopback only) by default.** This is a deliberate trade-off to keep the project simple, not an oversight: anyone who can reach the dashboard port can see all recorded request/source-IP/block data. If you need remote access, put it behind your own authenticating reverse proxy or SSH tunnel — do not change `WEB_BIND_HOST` to `0.0.0.0` or expose the port publicly without adding your own auth.
+- **Optional HTTP Basic Auth**: set `WEB_BASIC_AUTH_ENABLED=true` along with `WEB_BASIC_AUTH_USERNAME` and `WEB_BASIC_AUTH_PASSWORD` to require a single shared username/password to access every route (`/` and `/healthz`). This is an additional, opt-in layer on top of the loopback-binding default above — the dashboard still has no auth by default unless you set these. Basic Auth credentials are base64-encoded on the wire, not encrypted, so this is defense-in-depth, not a substitute for TLS if the dashboard is ever exposed beyond localhost (e.g. via a reverse proxy, which would be the right place to add HTTPS).
 
 ## DigitalOcean Automatic Blocking
 
