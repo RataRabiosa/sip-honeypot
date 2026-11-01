@@ -18,9 +18,13 @@ def _get_bool(raw, default: bool) -> bool:
     return raw.strip().lower() in ("1", "true", "yes", "on")
 
 
-def _empty_data(hours: int) -> dict:
+def _empty_data(hours: int, start=None, end=None) -> dict:
+    mode = "range" if start is not None and end is not None else "hours"
     return {
-        "hours": hours,
+        "mode": mode,
+        "hours": None if mode == "range" else hours,
+        "start": start.isoformat() if start is not None else None,
+        "end": end.isoformat() if end is not None else None,
         "totals": {
             "requests_total": 0,
             "requests_window": 0,
@@ -47,6 +51,21 @@ def _clamp_hours(raw) -> int:
     if hours > 720:
         return 720
     return hours
+
+
+def _parse_date_range(start_raw, end_raw):
+    if not start_raw or not end_raw:
+        return None
+    try:
+        start_date = datetime.date.fromisoformat(start_raw)
+        end_date = datetime.date.fromisoformat(end_raw)
+    except ValueError:
+        return None
+    if start_date > end_date:
+        start_date, end_date = end_date, start_date
+    if (end_date - start_date).days > 3650:
+        end_date = start_date + datetime.timedelta(days=3650)
+    return start_date, end_date
 
 
 def create_app() -> Flask:
@@ -108,14 +127,22 @@ def create_app() -> Flask:
 
     @app.route("/")
     def index():
-        hours = _clamp_hours(request.args.get("hours"))
+        date_range = _parse_date_range(request.args.get("start"), request.args.get("end"))
+        if date_range is not None:
+            start_date, end_date = date_range
+            hours = 24
+        else:
+            start_date = end_date = None
+            hours = _clamp_hours(request.args.get("hours"))
         conn = None
         try:
             conn = app.config["DB_CONNECT"]()
-            data = dashboard_data(conn, hours)
+            data = dashboard_data(conn, hours=hours, start=start_date, end=end_date)
             return render_template("index.html", data=data, db_error=None)
         except pymysql.err.Error as e:
-            return render_template("index.html", data=_empty_data(hours), db_error=str(e))
+            return render_template(
+                "index.html", data=_empty_data(hours, start=start_date, end=end_date), db_error=str(e)
+            )
         finally:
             if conn is not None:
                 try:

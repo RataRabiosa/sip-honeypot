@@ -134,6 +134,64 @@ def test_index_out_of_range_hours_clamps_to_720(app_with_fake_db):
     assert window_calls[0][1] == (720,)
 
 
+def test_index_date_range_short_span_uses_hourly_window(app_with_fake_db):
+    app, conn = app_with_fake_db
+    client = app.test_client()
+    resp = client.get("/?start=2026-01-01&end=2026-01-02")
+    assert resp.status_code == 200
+    window_calls = [c for c in conn.calls if c[0].strip().startswith("SELECT COUNT(*) AS n FROM request_events WHERE")]
+    assert window_calls
+    expected_start = datetime.datetime(2026, 1, 1, tzinfo=datetime.timezone.utc)
+    expected_end = datetime.datetime(2026, 1, 3, tzinfo=datetime.timezone.utc)
+    assert window_calls[0][1] == (expected_start, expected_end)
+    bucket_calls = [c for c in conn.calls if "GROUP BY bucket" in c[0]]
+    assert bucket_calls
+    assert "%%Y-%%m-%%d %%H:00" in bucket_calls[0][0]
+
+
+def test_index_date_range_long_span_uses_daily_buckets(app_with_fake_db):
+    app, conn = app_with_fake_db
+    client = app.test_client()
+    resp = client.get("/?start=2026-01-01&end=2026-02-01")
+    assert resp.status_code == 200
+    bucket_calls = [c for c in conn.calls if "GROUP BY bucket" in c[0]]
+    assert bucket_calls
+    assert "%%Y-%%m-%%d')" in bucket_calls[0][0]
+    assert "%%H:00" not in bucket_calls[0][0]
+
+
+def test_index_date_range_reversed_dates_are_swapped(app_with_fake_db):
+    app, conn = app_with_fake_db
+    client = app.test_client()
+    resp = client.get("/?start=2026-02-01&end=2026-01-01")
+    assert resp.status_code == 200
+    window_calls = [c for c in conn.calls if c[0].strip().startswith("SELECT COUNT(*) AS n FROM request_events WHERE")]
+    assert window_calls
+    expected_start = datetime.datetime(2026, 1, 1, tzinfo=datetime.timezone.utc)
+    expected_end = datetime.datetime(2026, 2, 2, tzinfo=datetime.timezone.utc)
+    assert window_calls[0][1] == (expected_start, expected_end)
+
+
+def test_index_invalid_date_range_falls_back_to_hours_mode(app_with_fake_db):
+    app, conn = app_with_fake_db
+    client = app.test_client()
+    resp = client.get("/?start=not-a-date&end=2026-01-02")
+    assert resp.status_code == 200
+    window_calls = [c for c in conn.calls if c[0].strip().startswith("SELECT COUNT(*) AS n FROM request_events WHERE")]
+    assert window_calls
+    assert window_calls[0][1] == (24,)
+
+
+def test_index_missing_end_date_falls_back_to_hours_mode(app_with_fake_db):
+    app, conn = app_with_fake_db
+    client = app.test_client()
+    resp = client.get("/?start=2026-01-01")
+    assert resp.status_code == 200
+    window_calls = [c for c in conn.calls if c[0].strip().startswith("SELECT COUNT(*) AS n FROM request_events WHERE")]
+    assert window_calls
+    assert window_calls[0][1] == (24,)
+
+
 def test_index_shows_error_banner_on_db_error(monkeypatch):
     monkeypatch.setenv("MYSQL_HOST", "fake-host")
     monkeypatch.setenv("MYSQL_USER", "fake-user")
