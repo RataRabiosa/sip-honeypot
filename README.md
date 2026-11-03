@@ -59,13 +59,13 @@ All variables are documented with comments in `.env.example`. Summary:
 | `METRICS_QUEUE_SIZE` | `10000` | Max in-memory buffered metrics events before new ones are dropped. |
 | `DO_BLOCK_ENABLED` | `false` | Enables automatic DigitalOcean firewall blocking. Requires `METRICS_ENABLED=true`. |
 | `DO_API_TOKEN` | — | DigitalOcean API token with firewall write access. Required if `DO_BLOCK_ENABLED=true`. Keep secret. |
-| `DO_FIREWALL_ID` | — | ID of the pre-existing DigitalOcean firewall to add deny rules to. Required if `DO_BLOCK_ENABLED=true`. |
+| `DO_FIREWALL_ID` | — | ID of the pre-existing DigitalOcean firewall whose honeypot-managed deny rule receives blocked IPs. Required if `DO_BLOCK_ENABLED=true`. |
 | `DO_API_BASE_URL` | `https://api.digitalocean.com` | DigitalOcean API base URL (override for testing only). |
 | `DO_API_TIMEOUT_SECONDS` | `10` | Timeout for DigitalOcean API calls. |
 | `DO_NEVER_BLOCK` | (empty) | Comma-separated CIDR ranges that must never be auto-blocked. **Populate this with your own management/admin IPs before enabling blocking.** |
 | `DO_RETRY_INTERVAL_SECONDS` | `300` | Minimum seconds between retrying a block attempt for the same IP. |
 | `DO_FAILURE_COOLDOWN_SECONDS` | `60` | Seconds to pause all new block attempts after a DigitalOcean API failure. |
-| `DO_MAX_BLOCKED_IPS` | `1000` | Local safety cap on the number of IPs this honeypot will block via the API. |
+| `DO_MAX_BLOCKED_IPS` | `1000` | Local cap on the number of IPs this honeypot will block (counted from its own database). DigitalOcean separately caps addresses across all deny rules at 1,000 combined; the client refuses to exceed that remote limit. |
 | `WEB_PORT` | `8080` | Port the dashboard listens on / is published as. |
 | `WEB_BIND_HOST` | `127.0.0.1` | Host interface the dashboard port is published on. |
 | `WEB_BASIC_AUTH_ENABLED` | `false` | Enables HTTP Basic Auth on the dashboard (additional layer, off by default). |
@@ -109,15 +109,18 @@ When `METRICS_ENABLED=true`, a small Flask dashboard (`web/`) reads from the met
 
 ## DigitalOcean Automatic Blocking
 
-When `DO_BLOCK_ENABLED=true` (and `METRICS_ENABLED=true`), the honeypot's metrics worker thread will, on first seeing a new globally-routable source IP, call the DigitalOcean Cloud Firewall API to add a `deny` inbound rule for that IP on the firewall identified by `DO_FIREWALL_ID`. State (pending/blocked/failed, attempts, last error) is tracked in the `blocked_ips` table and visible on the dashboard.
+When `DO_BLOCK_ENABLED=true` (and `METRICS_ENABLED=true`), the honeypot's metrics worker thread will, on first seeing a new globally-routable source IP, call the DigitalOcean Cloud Firewall API to block it. The honeypot maintains a single managed deny rule (`protocol=all`, all ports) on the firewall identified by `DO_FIREWALL_ID`; each newly blocked IP is appended to that rule's address list by reading the firewall (`GET`) and writing it back (`PUT`) with the IP added. A new managed rule is created only if none exists yet. State (pending/blocked/failed, attempts, last error) is tracked in the `blocked_ips` table and visible on the dashboard.
+
+Existing deployments upgrading from the older one-rule-per-IP behavior need no manual migration: the first pre-existing rule matching the managed shape (`protocol=all`, all ports, `action=deny`) is adopted as the managed rule automatically, and new IPs are appended to it. Other legacy per-IP rules are left alone and can optionally be consolidated by hand later.
 
 **Security warning: UDP source IPs can be spoofed.** SIP honeypot traffic arrives over UDP, and UDP source addresses are trivially forgeable. A block decision based solely on the apparent source IP of a UDP packet is **not** proof that IP actually sent the traffic — it could be collateral damage from a spoofed-source flood or reflection attack aimed at a third party. Treat auto-blocking as a best-effort noise-reduction measure, not an attribution or law-enforcement-grade signal.
 
 Before enabling `DO_BLOCK_ENABLED`:
 - Populate `DO_NEVER_BLOCK` with your own management/admin IP ranges (and any other IPs you never want blocked) so a spoofed or legitimate packet from your own infrastructure can never be firewalled off.
-- Remember DigitalOcean cloud firewalls have limits on the number of rules/addresses per firewall — this feature is not an unlimited blocklist. `DO_MAX_BLOCKED_IPS` provides a local safety cap, but you should also monitor your firewall's own limits.
+- DigitalOcean caps firewalls at 50 total rule objects and at 1,000 addresses combined across deny rules. This honeypot packs IPs into one managed rule specifically to stay within the 1,000-address ceiling instead of the 50-rule-object one — it is still not an unlimited blocklist. `DO_MAX_BLOCKED_IPS` and the remote 1,000-address cap are independent: hitting either one stops new blocks (visible as `LOCAL_CAP_REACHED` or `REMOTE_CAP_REACHED` in the dashboard/last_error).
 - This feature assumes a DigitalOcean firewall already exists (identified by `DO_FIREWALL_ID`); it does not create or provision firewall resources.
-- There is no automatic unblocking or TTL — blocked IPs stay blocked until removed manually from the DigitalOcean firewall.
+- Only one honeypot process should manage a given `DO_FIREWALL_ID` at a time. Manual edits to that firewall made in the DigitalOcean console/`doctl` while the honeypot is actively blocking may be overwritten, since each update reads and rewrites the whole firewall object.
+- There is no automatic unblocking or TTL — blocked IPs stay blocked until removed manually from the honeypot-managed rule's address list on the DigitalOcean firewall. Removing an IP that way does not reset that IP's `blocked` status in the honeypot's own database.
 
 ## Running the Test Suite
 
