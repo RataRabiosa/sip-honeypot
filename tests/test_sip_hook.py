@@ -97,3 +97,29 @@ def test_invite_200_ok_includes_dummy_sdp(monkeypatch):
     assert content_length > 0
     assert body != b""
     assert body.startswith(b"v=0")
+    assert b"s=FRITZ!OS 1.0\r\n" in body
+
+
+def test_invite_sdp_session_name_uses_custom_user_agent(monkeypatch):
+    # Make simulateResponse's deferLater run its callback immediately so we
+    # can observe the eventual response packets without a running reactor.
+    def _run_now(_reactor, _delay, fn, *args, **kwargs):
+        return fn(*args, **kwargs)
+
+    monkeypatch.setattr(sip.task, "deferLater", _run_now)
+
+    metrics = RecordingMetrics()
+    protocol = sip.SimpleSIPProtocol(user_agent="TestPhone 2.0", metrics=metrics)
+    protocol.transport = FakeTransport(host="198.51.100.1", port=5060)
+
+    src_addr = ("203.0.113.9", 5061)
+    datagram = build_sip_request("INVITE", "198.51.100.1", 5060, local_host=src_addr[0], local_port=src_addr[1])
+
+    protocol.datagramReceived(datagram, src_addr)
+
+    writes = [data for data, _addr in protocol.transport.writes]
+    ok_pkt = next(data for data in writes if data.startswith(b"SIP/2.0 200"))
+
+    headers, body = ok_pkt.split(b"\r\n\r\n", 1)
+    assert b"Server: TestPhone 2.0" in headers
+    assert b"s=TestPhone 2.0\r\n" in body

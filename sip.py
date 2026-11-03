@@ -323,7 +323,7 @@ class SimpleSIPProtocol(Base):
         sdp = (
             "v=0\r\n"
             f"o=- 0 0 IN IP4 {host}\r\n"
-            "s=VoIP Session\r\n"
+            f"s={self.user_agent}\r\n"
             f"c=IN IP4 {host}\r\n"
             "t=0 0\r\n"
             "m=audio 4000 RTP/AVP 0 8 101\r\n"
