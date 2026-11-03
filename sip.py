@@ -363,7 +363,7 @@ class SimpleSIPProtocol(Base):
             elif method == "INVITE":
                 packets.append(self._build_response_pkt(100, request, addr))
                 packets.append(self._build_response_pkt(180, request, addr))
-                packets.append(self._build_response_pkt(200, request, addr, body=b""))
+                packets.append(self._build_response_pkt(200, request, addr, body=self._make_sdp()))
             elif method in ("BYE", "CANCEL", "PRACK", "UPDATE", "INFO", "NOTIFY", "PING", "REFER", "SUBSCRIBE"):
                 packets.append(self._build_response_pkt(200, request, addr))
             elif method == "MESSAGE":
