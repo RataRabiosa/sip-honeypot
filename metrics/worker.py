@@ -18,6 +18,17 @@ class MetricsWorker:
     # these structures without bound. Oldest entries are evicted first.
     _MAX_DEDUP_ENTRIES = 50000
 
+    # How often (seconds) the worker loop wakes up with no new events to
+    # check whether a retry sweep is due. This is independent of
+    # do_retry_interval (which may be configured very large or, in tests,
+    # very small) so the sweep check always happens at a bounded cadence.
+    _SWEEP_POLL_INTERVAL = 5.0
+
+    # Cap on the number of failed IPs retried in a single sweep tick, since
+    # each retry may perform a live DO API call; without a bound, a large
+    # backlog of failed IPs could make one sweep tick block for a long time.
+    _MAX_SWEEP_RETRIES_PER_TICK = 500
+
     def __init__(self, settings, db, firewall, log_fn, clock=time.time):
         self._settings = settings
         self._db = db
@@ -32,6 +43,7 @@ class MetricsWorker:
         self._next_attempt_at = OrderedDict()
         self._cooldown_until = 0.0
         self._blocked_count = 0
+        self._next_sweep_at = 0.0
         self.submitted = 0
         self.processed = 0
         self.dropped = 0
@@ -63,7 +75,11 @@ class MetricsWorker:
 
     def _run(self):
         while True:
-            item = self._queue.get()
+            try:
+                item = self._queue.get(timeout=self._SWEEP_POLL_INTERVAL)
+            except queue.Empty:
+                self._maybe_sweep_failed_blocks()
+                continue
             if item is self._STOP:
                 break
             try:
@@ -71,6 +87,7 @@ class MetricsWorker:
                 self.processed += 1
             except Exception as e:
                 self._log(f"METRICS_WORKER_ERROR - {type(e).__name__}: {e}")
+            self._maybe_sweep_failed_blocks()
         try:
             self._db.close()
         except Exception:
@@ -115,6 +132,36 @@ class MetricsWorker:
             self._maybe_block(event["src_ip"], self._clock())
         except Exception as e:
             self._log(f"METRICS_WORKER_ERROR - {type(e).__name__}: {e}")
+
+    def _maybe_sweep_failed_blocks(self):
+        now = self._clock()
+        if now < self._next_sweep_at:
+            return
+        self._next_sweep_at = now + self._settings.do_retry_interval
+
+        if self._firewall is None:
+            return
+        if not self._ensure_db():
+            return
+
+        before_ts = now - self._settings.do_retry_interval
+        try:
+            ips = self._db.list_failed_ips_for_retry(before_ts, self._MAX_SWEEP_RETRIES_PER_TICK)
+        except (pymysql.err.OperationalError, pymysql.err.InterfaceError) as e:
+            self._db.close()
+            self._next_db_connect_at = self._clock() + 5.0
+            self.db_errors += 1
+            self._log(f"METRICS_DB - error: {type(e).__name__}: {e}")
+            return
+        except pymysql.err.Error as e:
+            self._log(f"METRICS_DB - error: {type(e).__name__}: {e}")
+            return
+
+        for ip in ips:
+            try:
+                self._maybe_block(ip, self._clock())
+            except Exception as e:
+                self._log(f"METRICS_WORKER_ERROR - {type(e).__name__}: {e}")
 
     def _bounded_set_add(self, ordered_dict, key):
         """Insert key into an OrderedDict used as an ordered set, evicting the

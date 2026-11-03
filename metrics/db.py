@@ -140,6 +140,17 @@ class MetricsDB:
                     (http_status, error, ip),
                 )
 
+    def list_failed_ips_for_retry(self, before_ts: float, limit: int) -> list:
+        cutoff = _to_naive_utc(before_ts)
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT src_ip FROM blocked_ips WHERE status='failed' AND last_attempt_at <= %s "
+                "ORDER BY last_attempt_at ASC LIMIT %s",
+                (cutoff, int(limit)),
+            )
+            rows = cur.fetchall()
+        return [row["src_ip"] for row in rows]
+
     def count_blocked(self) -> int:
         with self._conn.cursor() as cur:
             cur.execute("SELECT COUNT(*) AS n FROM blocked_ips WHERE status='blocked'")

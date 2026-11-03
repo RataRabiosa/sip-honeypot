@@ -61,6 +61,16 @@ class FakeDB:
     def count_blocked(self):
         return len(self.blocked_ips)
 
+    def list_failed_ips_for_retry(self, before_ts, limit):
+        cutoff = _utc(before_ts)
+        candidates = [
+            (ip, st["last_attempt_at"])
+            for ip, st in self.state.items()
+            if st["status"] == "failed" and st["last_attempt_at"] <= cutoff
+        ]
+        candidates.sort(key=lambda pair: pair[1])
+        return [ip for ip, _ in candidates[:limit]]
+
 
 class FakeFirewall:
     def __init__(self, result=None):
@@ -249,3 +259,83 @@ def test_stop_returns_without_hanging():
     worker.start()
     worker.stop(timeout=5.0)
     assert not worker._thread.is_alive()
+
+
+def test_sweep_retries_failed_ip_once_retry_interval_has_elapsed():
+    db = FakeDB()
+    fw = FakeFirewall(result=DOResult(False, 500, "boom"))
+    logs = []
+    clock_value = [1000.0]
+    worker = MetricsWorker(
+        _settings(do_retry_interval=300, do_failure_cooldown=0),
+        db,
+        fw,
+        log_fn=logs.append,
+        clock=lambda: clock_value[0],
+    )
+
+    worker._process(make_event("1.1.1.1", clock_value[0]))
+    assert fw.calls == ["1.1.1.1"]
+    assert db.state["1.1.1.1"]["status"] == "failed"
+
+    # Before the retry interval has elapsed, a sweep must not retry the IP.
+    clock_value[0] = 1000.0 + 299.0
+    worker._next_sweep_at = 0.0  # force the sweep to be due regardless of cadence
+    worker._maybe_sweep_failed_blocks()
+    assert fw.calls == ["1.1.1.1"]
+
+    # Once the retry interval has elapsed, the sweep retries it without any
+    # new inbound traffic for that IP.
+    clock_value[0] = 1000.0 + 301.0
+    worker._next_sweep_at = 0.0
+    worker._maybe_sweep_failed_blocks()
+    assert fw.calls == ["1.1.1.1", "1.1.1.1"]
+
+
+def test_sweep_is_noop_when_firewall_disabled():
+    db = FakeDB()
+    logs = []
+    clock_value = [1000.0]
+    worker = MetricsWorker(
+        _settings(do_retry_interval=300),
+        db,
+        None,
+        log_fn=logs.append,
+        clock=lambda: clock_value[0],
+    )
+
+    called = []
+    db.list_failed_ips_for_retry = lambda *a, **k: called.append(1) or []
+
+    worker._next_sweep_at = 0.0
+    worker._maybe_sweep_failed_blocks()
+
+    assert called == []
+    assert not db.connected
+
+
+def test_sweep_does_not_rerun_until_next_sweep_at_elapses():
+    db = FakeDB()
+    fw = FakeFirewall(result=DOResult(False, 500, "boom"))
+    logs = []
+    clock_value = [1000.0]
+    worker = MetricsWorker(
+        _settings(do_retry_interval=300, do_failure_cooldown=0),
+        db,
+        fw,
+        log_fn=logs.append,
+        clock=lambda: clock_value[0],
+    )
+
+    worker._process(make_event("1.1.1.1", clock_value[0]))
+    assert fw.calls == ["1.1.1.1"]
+
+    clock_value[0] = 1000.0 + 301.0
+    worker._next_sweep_at = 0.0
+    worker._maybe_sweep_failed_blocks()
+    assert fw.calls == ["1.1.1.1", "1.1.1.1"]
+
+    # A second call at the same `now`, without advancing past the newly set
+    # _next_sweep_at, must not run the sweep again.
+    worker._maybe_sweep_failed_blocks()
+    assert fw.calls == ["1.1.1.1", "1.1.1.1"]
