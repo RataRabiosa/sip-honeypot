@@ -462,6 +462,21 @@ def main():
                 timeout=settings.do_api_timeout,
             )
 
+            if settings.do_load_balancer_ids:
+                from metrics.doblock import FanoutBlocker
+                from metrics.doloadbalancer import DOLoadBalancerClient
+
+                load_balancers = [
+                    DOLoadBalancerClient(
+                        settings.do_api_token,
+                        lb_id,
+                        base_url=settings.do_api_base_url,
+                        timeout=settings.do_api_timeout,
+                    )
+                    for lb_id in settings.do_load_balancer_ids
+                ]
+                firewall = FanoutBlocker(firewall, load_balancers)
+
         worker = MetricsWorker(settings, db, firewall, log_fn=lambda m: reactor.callFromThread(log.msg, m))
         worker.start()
         reactor.addSystemEventTrigger("before", "shutdown", worker.stop)
@@ -471,7 +486,13 @@ def main():
             f"METRICS: enabled -> mysql://{settings.mysql_user}@{settings.mysql_host}:{settings.mysql_port}/{settings.mysql_database}"
         )
         if settings.do_block_enabled:
-            print(f"DO BLOCK: enabled (firewall {settings.do_firewall_id})")
+            if settings.do_load_balancer_ids:
+                print(
+                    f"DO BLOCK: enabled (firewall {settings.do_firewall_id}, "
+                    f"load balancers {', '.join(settings.do_load_balancer_ids)})"
+                )
+            else:
+                print(f"DO BLOCK: enabled (firewall {settings.do_firewall_id})")
         else:
             print("DO BLOCK: disabled")
     else:

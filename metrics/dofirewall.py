@@ -1,16 +1,16 @@
 import collections
 import copy
-import json
-import socket
-import urllib.error
-import urllib.request
+from typing import List, Optional, Tuple
 
-DOResult = collections.namedtuple("DOResult", "ok http_status error")
+from metrics.doapi import USER_AGENT, DOResult
+from metrics.doapi import parse_object
+from metrics.doapi import request as _do_request
+
 UpdatePlan = collections.namedtuple("UpdatePlan", "payload already_present error")
 
 
 class DOFirewallClient:
-    USER_AGENT = "sip-honeypot/1.0 (+https://github.com/0xNslabs/sip-honeypot)"
+    USER_AGENT = USER_AGENT
 
     # DigitalOcean caps the total addresses across all deny rules of a firewall
     # at 1000, combined across inbound sources and outbound destinations. This
@@ -89,6 +89,42 @@ class DOFirewallClient:
         return total
 
     @staticmethod
+    def managed_deny_addresses(firewall: dict) -> List[str]:
+        """Collect every address across all managed inbound deny rules.
+
+        There can be more than one managed rule (e.g. legacy per-IP rules
+        predating the single-managed-rule behavior). Addresses are
+        de-duplicated, preserving first-encounter order. This is a read
+        helper for the backfill script, not a validator: it is defensive
+        against malformed nested shapes (skips them) rather than raising,
+        and never raises on a dict `firewall`.
+        """
+        addresses: List[str] = []
+        seen = set()
+        if not isinstance(firewall, dict):
+            return addresses
+        inbound_rules = firewall.get("inbound_rules")
+        if not isinstance(inbound_rules, list):
+            return addresses
+        for rule in inbound_rules:
+            if not DOFirewallClient.is_managed_rule(rule):
+                continue
+            sources = rule.get("sources") if isinstance(rule, dict) else None
+            if not isinstance(sources, dict):
+                continue
+            rule_addresses = sources.get("addresses")
+            if not isinstance(rule_addresses, list):
+                continue
+            for addr in rule_addresses:
+                if not isinstance(addr, str):
+                    continue
+                if addr in seen:
+                    continue
+                seen.add(addr)
+                addresses.append(addr)
+        return addresses
+
+    @staticmethod
     def plan_update(firewall: dict, ip: str) -> "UpdatePlan":
         if not isinstance(firewall, dict):
             return UpdatePlan(None, False, "MALFORMED_FIREWALL_RESPONSE: firewall is not an object")
@@ -165,53 +201,30 @@ class DOFirewallClient:
         failure, status/error follow the same conventions used throughout
         this client for mapping urllib exceptions to DOResult-style errors.
         """
-        url = f"{self._base_url}{path}"
-        headers = {
-            "Authorization": f"Bearer {self._token}",
-            "Accept": "application/json",
-            "User-Agent": self.USER_AGENT,
-        }
-        data = None
-        if body is not None:
-            data = json.dumps(body).encode("utf-8")
-            headers["Content-Type"] = "application/json"
-        req = urllib.request.Request(url, data=data, method=method, headers=headers)
-        try:
-            with urllib.request.urlopen(req, timeout=self._timeout) as resp:
-                status = resp.status
-                response_body = resp.read()
-                if 200 <= status < 300:
-                    return status, response_body, None
-                return status, response_body, f"HTTP {status}: unexpected status"
-        except urllib.error.HTTPError as e:
-            try:
-                snippet = e.read(2048).decode("utf-8", errors="replace")
-            except Exception:
-                snippet = ""
-            return e.code, None, f"HTTP {e.code}: {snippet}"
-        except (urllib.error.URLError, socket.timeout, TimeoutError, OSError, ValueError) as e:
-            return None, None, f"{type(e).__name__}: {e}"
+        return _do_request(self._base_url, self._token, self._timeout, method, path, body)
 
-    def add_deny_rule(self, ip: str) -> DOResult:
+    def fetch(self) -> Tuple[DOResult, Optional[dict]]:
+        """GET the firewall and return (DOResult, firewall_dict_or_None)."""
         get_status, get_body, get_error = self._request("GET", f"/v2/firewalls/{self._firewall_id}")
         if get_error is not None:
-            return DOResult(False, get_status, get_error)
+            return DOResult(False, get_status, get_error), None
 
-        try:
-            parsed = json.loads(get_body.decode("utf-8"))
-        except (ValueError, UnicodeDecodeError):
-            return DOResult(False, get_status, "MALFORMED_FIREWALL_RESPONSE: body is not valid JSON")
+        firewall, parse_error = parse_object(get_body, "firewall", "MALFORMED_FIREWALL_RESPONSE")
+        if parse_error is not None:
+            return DOResult(False, get_status, parse_error), None
+        return DOResult(True, get_status, None), firewall
 
-        firewall = parsed.get("firewall") if isinstance(parsed, dict) else None
-        if not isinstance(firewall, dict):
-            return DOResult(False, get_status, "MALFORMED_FIREWALL_RESPONSE: missing 'firewall' object")
+    def add_deny_rule(self, ip: str) -> DOResult:
+        res, firewall = self.fetch()
+        if not res.ok:
+            return res
 
         plan = self.plan_update(firewall, ip)
         if plan.already_present:
-            return DOResult(True, get_status, None)
+            return DOResult(True, res.http_status, None)
         if plan.error is not None:
             if plan.error.startswith("MALFORMED_FIREWALL_RESPONSE"):
-                return DOResult(False, get_status, plan.error)
+                return DOResult(False, res.http_status, plan.error)
             return DOResult(False, None, plan.error)
 
         put_status, _put_body, put_error = self._request("PUT", f"/v2/firewalls/{self._firewall_id}", body=plan.payload)

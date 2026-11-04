@@ -30,6 +30,7 @@ class Settings:
     do_block_enabled: bool
     do_api_token: Optional[str]
     do_firewall_id: Optional[str]
+    do_load_balancer_ids: Tuple[str, ...]
     do_api_base_url: str
     do_api_timeout: float
     do_never_block: Tuple[IPNet, ...]
@@ -69,6 +70,22 @@ def _get_float(environ: Mapping[str, str], key: str, default: float) -> float:
         return float(raw.strip())
     except ValueError:
         raise ConfigError(f"{key} must be a number, got: {raw!r}")
+
+
+def parse_load_balancer_ids(raw: Optional[str]) -> Tuple[str, ...]:
+    if not raw:
+        return ()
+    ids = []
+    seen = set()
+    for entry in raw.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        if entry in seen:
+            raise ConfigError(f"DO_LOAD_BALANCER_IDS contains a duplicate entry: {entry!r}")
+        seen.add(entry)
+        ids.append(entry)
+    return tuple(ids)
 
 
 def load_settings(script_dir: str, environ: Optional[Mapping[str, str]] = None) -> Settings:
@@ -123,6 +140,9 @@ def load_settings(script_dir: str, environ: Optional[Mapping[str, str]] = None) 
     if do_block_enabled and not do_firewall_id:
         raise ConfigError("DO_FIREWALL_ID is required when DO_BLOCK_ENABLED is true")
 
+    raw_load_balancer_ids = _get_str(environ, "DO_LOAD_BALANCER_IDS", "")
+    do_load_balancer_ids = parse_load_balancer_ids(raw_load_balancer_ids)
+
     do_api_base_url = (_get_str(environ, "DO_API_BASE_URL", "https://api.digitalocean.com") or "").rstrip("/")
 
     do_api_timeout = _get_float(environ, "DO_API_TIMEOUT_SECONDS", 10)
@@ -163,6 +183,7 @@ def load_settings(script_dir: str, environ: Optional[Mapping[str, str]] = None) 
         do_block_enabled=do_block_enabled,
         do_api_token=do_api_token,
         do_firewall_id=do_firewall_id,
+        do_load_balancer_ids=do_load_balancer_ids,
         do_api_base_url=do_api_base_url,
         do_api_timeout=do_api_timeout,
         do_never_block=tuple(never_block),

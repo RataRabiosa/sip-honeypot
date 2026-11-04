@@ -60,6 +60,7 @@ All variables are documented with comments in `.env.example`. Summary:
 | `DO_BLOCK_ENABLED` | `false` | Enables automatic DigitalOcean firewall blocking. Requires `METRICS_ENABLED=true`. |
 | `DO_API_TOKEN` | — | DigitalOcean API token with firewall write access. Required if `DO_BLOCK_ENABLED=true`. Keep secret. |
 | `DO_FIREWALL_ID` | — | ID of the pre-existing DigitalOcean firewall whose honeypot-managed deny rule receives blocked IPs. Required if `DO_BLOCK_ENABLED=true`. |
+| `DO_LOAD_BALANCER_IDS` | (empty) | Optional, comma-separated DigitalOcean load balancer IDs. Each one's `firewall.deny` is kept in sync with the honeypot's blocks; `firewall.allow` is never touched. |
 | `DO_API_BASE_URL` | `https://api.digitalocean.com` | DigitalOcean API base URL (override for testing only). |
 | `DO_API_TIMEOUT_SECONDS` | `10` | Timeout for DigitalOcean API calls. |
 | `DO_NEVER_BLOCK` | (empty) | Comma-separated CIDR ranges that must never be auto-blocked. **Populate this with your own management/admin IPs before enabling blocking.** |
@@ -121,6 +122,14 @@ Before enabling `DO_BLOCK_ENABLED`:
 - This feature assumes a DigitalOcean firewall already exists (identified by `DO_FIREWALL_ID`); it does not create or provision firewall resources.
 - Only one honeypot process should manage a given `DO_FIREWALL_ID` at a time. Manual edits to that firewall made in the DigitalOcean console/`doctl` while the honeypot is actively blocking may be overwritten, since each update reads and rewrites the whole firewall object.
 - There is no automatic unblocking or TTL — blocked IPs stay blocked until removed manually from the honeypot-managed rule's address list on the DigitalOcean firewall. Removing an IP that way does not reset that IP's `blocked` status in the honeypot's own database.
+
+### Mirroring blocks to load balancers
+
+Setting `DO_LOAD_BALANCER_IDS` (comma-separated) is entirely opt-in: leaving it empty keeps today's behavior unchanged — only the firewall is touched. When set, each successful firewall block is also mirrored into every listed load balancer's `firewall.deny` list; `firewall.allow` is never written to on any load balancer. Ordering is firewall-first and fail-fast: the firewall is updated first, and the load balancers are only attempted if that succeeds (including the "already blocked" case); the first load balancer failure stops the rest from being attempted that cycle (the retry sweep will pick them up again later). A load balancer failure surfaces in the dashboard/`last_error` as `LB <id>: <error>`. There is no separate size limit on a load balancer's deny list — it is bounded only indirectly, by the existing `DO_MAX_BLOCKED_IPS`/firewall caps upstream. `DO_LOAD_BALANCER_IDS` has no effect unless `DO_BLOCK_ENABLED=true` is also set, since mirroring only runs as part of the same blocking pipeline. A persistent failure on just one load balancer will show that IP as `failed` in the dashboard even though the firewall block itself succeeded; the background retry sweep picks it up automatically, so this is expected, self-healing behavior rather than a bug.
+
+When first enabling `DO_LOAD_BALANCER_IDS` on a honeypot that has already blocked IPs, run `scripts/backfill_lb_deny.py` once to copy every address already in the firewall's managed deny rule(s) into the newly configured load balancers (new blocks going forward are mirrored automatically; this script only catches up on history). Try `--dry-run` first to preview what would change before writing anything.
+
+**Unconfirmed assumption:** the load balancer `PUT` is assumed to carry forward every field from the `GET` response unchanged except the known read-only fields and the region/droplet_ids/tag transforms (the same full-replace pattern already used for the Firewalls product) — this has not been validated against a real DigitalOcean account. Before enabling this in production, run `scripts/backfill_lb_deny.py --dry-run --show-payload` and review one load balancer's payload.
 
 ## Running the Test Suite
 

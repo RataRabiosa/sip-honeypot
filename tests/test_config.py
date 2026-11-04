@@ -1,6 +1,6 @@
 import pytest
 
-from metrics.config import ConfigError, load_settings
+from metrics.config import ConfigError, load_settings, parse_load_balancer_ids
 
 
 def test_defaults_minimal_environ(tmp_path):
@@ -22,6 +22,7 @@ def test_defaults_minimal_environ(tmp_path):
     assert settings.do_retry_interval == 300
     assert settings.do_failure_cooldown == 60
     assert settings.do_max_blocked_ips == 1000
+    assert settings.do_load_balancer_ids == ()
 
 
 @pytest.mark.parametrize(
@@ -140,3 +141,42 @@ def test_invalid_sip_port_raises(tmp_path):
         load_settings(str(tmp_path), environ={"SIP_PORT": "0"})
     with pytest.raises(ConfigError):
         load_settings(str(tmp_path), environ={"SIP_PORT": "70000"})
+
+
+def test_do_load_balancer_ids_default_empty(tmp_path):
+    settings = load_settings(str(tmp_path), environ={})
+    assert settings.do_load_balancer_ids == ()
+
+
+def test_do_load_balancer_ids_parses_whitespace_and_blank_entries_preserving_order(tmp_path):
+    settings = load_settings(
+        str(tmp_path),
+        environ={"DO_LOAD_BALANCER_IDS": " lb-1 ,lb-2,, lb-3 ,"},
+    )
+    assert settings.do_load_balancer_ids == ("lb-1", "lb-2", "lb-3")
+
+
+def test_do_load_balancer_ids_duplicate_entry_raises(tmp_path):
+    with pytest.raises(ConfigError) as exc_info:
+        load_settings(str(tmp_path), environ={"DO_LOAD_BALANCER_IDS": "lb-1,lb-2,lb-1"})
+    assert "DO_LOAD_BALANCER_IDS contains a duplicate entry: 'lb-1'" in str(exc_info.value)
+
+
+def test_do_load_balancer_ids_accepted_when_do_block_disabled(tmp_path):
+    settings = load_settings(str(tmp_path), environ={"DO_LOAD_BALANCER_IDS": "lb-1"})
+    assert settings.do_block_enabled is False
+    assert settings.do_load_balancer_ids == ("lb-1",)
+
+
+def test_parse_load_balancer_ids_none_and_empty():
+    assert parse_load_balancer_ids(None) == ()
+    assert parse_load_balancer_ids("") == ()
+
+
+def test_parse_load_balancer_ids_strips_and_skips_blanks_preserving_order():
+    assert parse_load_balancer_ids(" a , b ,,c ,") == ("a", "b", "c")
+
+
+def test_parse_load_balancer_ids_duplicate_raises():
+    with pytest.raises(ConfigError):
+        parse_load_balancer_ids("a,b,a")
