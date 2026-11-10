@@ -5,6 +5,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
 
+from metrics.doapi import DOResult
 from metrics.dofirewall import DOFirewallClient
 
 TOKEN = "super-secret-do-token-12345"
@@ -148,6 +149,7 @@ def test_add_deny_rule_create_path_no_existing_managed_rule():
         assert result.ok is True
         assert result.http_status == 200
         assert result.error is None
+        assert result.firewall_id == client.firewall_id
 
         assert get_req["headers"]["Authorization"] == f"Bearer {TOKEN}"
         assert put_req["headers"]["Authorization"] == f"Bearer {TOKEN}"
@@ -191,6 +193,7 @@ def test_add_deny_rule_append_path_existing_managed_rule_with_extra_source_keys(
         assert result.ok is True
         assert result.http_status == 200
         assert result.error is None
+        assert result.firewall_id == client.firewall_id
     finally:
         server.shutdown()
         thread.join(timeout=5)
@@ -218,6 +221,7 @@ def test_add_deny_rule_only_first_matching_rule_is_appended_to():
         assert put_body["inbound_rules"][1] == rule_b
         assert put_body["inbound_rules"][2] == rule_c
         assert result.ok is True
+        assert result.firewall_id == client.firewall_id
     finally:
         server.shutdown()
         thread.join(timeout=5)
@@ -241,6 +245,7 @@ def test_add_deny_rule_ports_normalization_all():
         assert len(put_body["inbound_rules"]) == 1
         assert put_body["inbound_rules"][0]["sources"]["addresses"] == ["198.51.100.1", "198.51.100.2"]
         assert result.ok is True
+        assert result.firewall_id == client.firewall_id
     finally:
         server.shutdown()
         thread.join(timeout=5)
@@ -264,6 +269,7 @@ def test_add_deny_rule_ports_normalization_empty_string():
         assert len(put_body["inbound_rules"]) == 1
         assert put_body["inbound_rules"][0]["sources"]["addresses"] == ["198.51.100.1", "198.51.100.2"]
         assert result.ok is True
+        assert result.firewall_id == client.firewall_id
     finally:
         server.shutdown()
         thread.join(timeout=5)
@@ -292,6 +298,7 @@ def test_add_deny_rule_idempotent_ip_already_present():
         assert result.ok is True
         assert result.http_status == 200
         assert result.error is None
+        assert result.firewall_id == client.firewall_id
     finally:
         server.shutdown()
         thread.join(timeout=5)
@@ -324,6 +331,7 @@ def test_add_deny_rule_remote_cap_reached():
         assert result.http_status is None
         assert result.error.startswith("REMOTE_CAP_REACHED")
         assert TOKEN not in (result.error or "")
+        assert result.firewall_id == client.firewall_id
     finally:
         server.shutdown()
         thread.join(timeout=5)
@@ -362,6 +370,7 @@ def test_add_deny_rule_remote_cap_allowed_at_boundary():
         assert result.ok is True
         assert result.http_status == 200
         assert result.error is None
+        assert result.firewall_id == client.firewall_id
     finally:
         server.shutdown()
         thread.join(timeout=5)
@@ -381,6 +390,7 @@ def test_add_deny_rule_handles_get_401_with_json_body():
         assert TOKEN not in (result.error or "")
         assert len(server.requests) == 1
         assert server.requests[0]["method"] == "GET"
+        assert result.firewall_id == client.firewall_id
     finally:
         server.shutdown()
         thread.join(timeout=5)
@@ -403,6 +413,7 @@ def test_add_deny_rule_handles_malformed_get_body(get_body):
         assert TOKEN not in (result.error or "")
         assert len(server.requests) == 1
         assert server.requests[0]["method"] == "GET"
+        assert result.firewall_id == client.firewall_id
     finally:
         server.shutdown()
         thread.join(timeout=5)
@@ -431,6 +442,7 @@ def test_add_deny_rule_handles_malformed_firewall_shape(firewall):
         assert TOKEN not in (result.error or "")
         assert len(server.requests) == 1
         assert server.requests[0]["method"] == "GET"
+        assert result.firewall_id == client.firewall_id
     finally:
         server.shutdown()
         thread.join(timeout=5)
@@ -458,6 +470,7 @@ def test_add_deny_rule_rejects_malformed_inbound_sources_shape(inbound_rules):
         assert TOKEN not in (result.error or "")
         assert len(server.requests) == 1
         assert server.requests[0]["method"] == "GET"
+        assert result.firewall_id == client.firewall_id
     finally:
         server.shutdown()
         thread.join(timeout=5)
@@ -482,6 +495,7 @@ def test_add_deny_rule_rejects_malformed_outbound_destinations_shape():
         assert TOKEN not in (result.error or "")
         assert len(server.requests) == 1
         assert server.requests[0]["method"] == "GET"
+        assert result.firewall_id == client.firewall_id
     finally:
         server.shutdown()
         thread.join(timeout=5)
@@ -514,6 +528,7 @@ def test_add_deny_rule_handles_put_422():
         assert len(server.requests) == 2
         assert server.requests[0]["method"] == "GET"
         assert server.requests[1]["method"] == "PUT"
+        assert result.firewall_id == client.firewall_id
     finally:
         server.shutdown()
         thread.join(timeout=5)
@@ -531,6 +546,15 @@ def test_add_deny_rule_handles_connection_failure():
     assert result.ok is False
     assert result.http_status is None
     assert TOKEN not in (result.error or "")
+    assert result.firewall_id == client.firewall_id
+
+
+def test_doresult_three_arg_call_keeps_firewall_id_none():
+    result = DOResult(True, 200, None)
+    assert result.ok is True
+    assert result.http_status == 200
+    assert result.error is None
+    assert result.firewall_id is None
 
 
 def test_plan_update_does_not_mutate_input_firewall():

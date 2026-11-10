@@ -50,10 +50,12 @@ class FakeDB:
         st["attempts"] += 1
         st["last_attempt_at"] = _utc(ts)
 
-    def mark_block_result(self, ip, ts, ok, http_status, error):
+    def mark_block_result(self, ip, ts, ok, http_status, error, firewall_id=None):
         st = self.state.setdefault(ip, {"status": "pending", "attempts": 1, "last_attempt_at": _utc(ts)})
         if ok:
             st["status"] = "blocked"
+            if firewall_id is not None:
+                st["firewall_id"] = firewall_id
             self.blocked_ips.add(ip)
         else:
             st["status"] = "failed"
@@ -108,6 +110,21 @@ def make_event(ip, ts):
         "to_uri": None,
         "call_id": None,
     }
+
+
+def test_sharded_blocker_result_records_actual_firewall_id_not_configured_primary():
+    db = FakeDB()
+    # Simulates a ShardedFirewallBlocker that spilled past the configured
+    # primary firewall ("fw-1") to a third shard ("fw-3").
+    fw = FakeFirewall(result=DOResult(True, 200, None, "fw-3"))
+    logs = []
+    worker = MetricsWorker(_settings(do_firewall_id="fw-1"), db, fw, log_fn=logs.append, clock=lambda: 1000.0)
+
+    worker._process(make_event("1.1.1.1", 1000.0))
+
+    assert fw.calls == ["1.1.1.1"]
+    assert db.state["1.1.1.1"]["status"] == "blocked"
+    assert db.state["1.1.1.1"]["firewall_id"] == "fw-3"
 
 
 def test_event_is_inserted_and_upserted():

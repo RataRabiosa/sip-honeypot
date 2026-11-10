@@ -1,10 +1,11 @@
 from metrics.doapi import DOResult
-from metrics.doblock import FanoutBlocker
+from metrics.doblock import FanoutBlocker, ShardedFirewallBlocker
 
 
 class FakeFirewall:
-    def __init__(self, result=None):
+    def __init__(self, result=None, firewall_id=None):
         self.calls = []
+        self.firewall_id = firewall_id
         self._result = result or DOResult(True, 204, None)
 
     def add_deny_rule(self, ip):
@@ -101,3 +102,66 @@ def test_second_lb_never_called_after_first_lb_failure_values_preserved():
     assert result.http_status is None
     assert result.error == "LB lb-1: ConnectionRefusedError: boom"
     assert lb2.calls == []
+
+
+def test_sharded_blocker_shard_zero_succeeds_shard_one_never_called():
+    shard0 = FakeFirewall(result=DOResult(True, 200, None, "fw-0"), firewall_id="fw-0")
+    shard1 = FakeFirewall(firewall_id="fw-1")
+    blocker = ShardedFirewallBlocker([shard0, shard1])
+
+    result = blocker.add_deny_rule("198.51.100.7")
+
+    assert shard0.calls == ["198.51.100.7"]
+    assert shard1.calls == []
+    assert result == DOResult(True, 200, None, "fw-0")
+
+
+def test_sharded_blocker_cap_reached_spills_to_shard_one():
+    shard0 = FakeFirewall(
+        result=DOResult(False, None, "REMOTE_CAP_REACHED: firewall has 1000 deny addresses (limit 1000)", "fw-0"),
+        firewall_id="fw-0",
+    )
+    shard1 = FakeFirewall(result=DOResult(True, 200, None, "fw-1"), firewall_id="fw-1")
+    blocker = ShardedFirewallBlocker([shard0, shard1])
+
+    result = blocker.add_deny_rule("198.51.100.7")
+
+    assert shard0.calls == ["198.51.100.7"]
+    assert shard1.calls == ["198.51.100.7"]
+    assert result == DOResult(True, 200, None, "fw-1")
+
+
+def test_sharded_blocker_all_shards_cap_reached_returns_last_result():
+    shard0 = FakeFirewall(result=DOResult(False, None, "REMOTE_CAP_REACHED: shard 0 full", "fw-0"), firewall_id="fw-0")
+    shard1 = FakeFirewall(result=DOResult(False, None, "REMOTE_CAP_REACHED: shard 1 full", "fw-1"), firewall_id="fw-1")
+    blocker = ShardedFirewallBlocker([shard0, shard1])
+
+    result = blocker.add_deny_rule("198.51.100.7")
+
+    assert shard0.calls == ["198.51.100.7"]
+    assert shard1.calls == ["198.51.100.7"]
+    assert result == DOResult(False, None, "REMOTE_CAP_REACHED: shard 1 full", "fw-1")
+
+
+def test_sharded_blocker_non_cap_failure_stops_immediately():
+    shard0_result = DOResult(False, 500, "boom", "fw-0")
+    shard0 = FakeFirewall(result=shard0_result, firewall_id="fw-0")
+    shard1 = FakeFirewall(firewall_id="fw-1")
+    blocker = ShardedFirewallBlocker([shard0, shard1])
+
+    result = blocker.add_deny_rule("198.51.100.7")
+
+    assert shard0.calls == ["198.51.100.7"]
+    assert shard1.calls == []
+    assert result == shard0_result
+
+
+def test_sharded_blocker_single_shard_behaves_like_bare_shard():
+    shard_result = DOResult(True, 204, None, "fw-0")
+    shard = FakeFirewall(result=shard_result, firewall_id="fw-0")
+    blocker = ShardedFirewallBlocker([shard])
+
+    result = blocker.add_deny_rule("198.51.100.7")
+
+    assert shard.calls == ["198.51.100.7"]
+    assert result == shard_result

@@ -30,6 +30,7 @@ class Settings:
     do_block_enabled: bool
     do_api_token: Optional[str]
     do_firewall_id: Optional[str]
+    do_firewall_ids: Tuple[str, ...]
     do_load_balancer_ids: Tuple[str, ...]
     do_api_base_url: str
     do_api_timeout: float
@@ -88,6 +89,22 @@ def parse_load_balancer_ids(raw: Optional[str]) -> Tuple[str, ...]:
     return tuple(ids)
 
 
+def parse_firewall_ids(raw: Optional[str]) -> Tuple[str, ...]:
+    if not raw:
+        return ()
+    ids = []
+    seen = set()
+    for entry in raw.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        if entry in seen:
+            raise ConfigError(f"DO_FIREWALL_IDS contains a duplicate entry: {entry!r}")
+        seen.add(entry)
+        ids.append(entry)
+    return tuple(ids)
+
+
 def load_settings(script_dir: str, environ: Optional[Mapping[str, str]] = None) -> Settings:
     if environ is None:
         from dotenv import load_dotenv
@@ -137,8 +154,23 @@ def load_settings(script_dir: str, environ: Optional[Mapping[str, str]] = None) 
         raise ConfigError("DO_API_TOKEN is required when DO_BLOCK_ENABLED is true")
 
     do_firewall_id = _get_str(environ, "DO_FIREWALL_ID", None)
-    if do_block_enabled and not do_firewall_id:
-        raise ConfigError("DO_FIREWALL_ID is required when DO_BLOCK_ENABLED is true")
+
+    raw_firewall_ids = _get_str(environ, "DO_FIREWALL_IDS", "")
+    parsed_firewall_ids = parse_firewall_ids(raw_firewall_ids)
+    if parsed_firewall_ids:
+        if do_firewall_id and do_firewall_id != parsed_firewall_ids[0]:
+            raise ConfigError(
+                "DO_FIREWALL_ID, when set alongside DO_FIREWALL_IDS, must equal DO_FIREWALL_IDS' first entry"
+            )
+        do_firewall_ids = parsed_firewall_ids
+        do_firewall_id = parsed_firewall_ids[0]
+    elif do_firewall_id:
+        do_firewall_ids = (do_firewall_id,)
+    else:
+        do_firewall_ids = ()
+
+    if do_block_enabled and not do_firewall_ids:
+        raise ConfigError("DO_FIREWALL_ID or DO_FIREWALL_IDS is required when DO_BLOCK_ENABLED is true")
 
     raw_load_balancer_ids = _get_str(environ, "DO_LOAD_BALANCER_IDS", "")
     do_load_balancer_ids = parse_load_balancer_ids(raw_load_balancer_ids)
@@ -183,6 +215,7 @@ def load_settings(script_dir: str, environ: Optional[Mapping[str, str]] = None) 
         do_block_enabled=do_block_enabled,
         do_api_token=do_api_token,
         do_firewall_id=do_firewall_id,
+        do_firewall_ids=do_firewall_ids,
         do_load_balancer_ids=do_load_balancer_ids,
         do_api_base_url=do_api_base_url,
         do_api_timeout=do_api_timeout,

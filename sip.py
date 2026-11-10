@@ -454,16 +454,28 @@ def main():
         firewall = None
         if settings.do_block_enabled:
             from metrics.dofirewall import DOFirewallClient
+            from metrics.doblock import FanoutBlocker, ShardedFirewallBlocker
 
-            firewall = DOFirewallClient(
-                settings.do_api_token,
-                settings.do_firewall_id,
-                base_url=settings.do_api_base_url,
-                timeout=settings.do_api_timeout,
-            )
+            if len(settings.do_firewall_ids) > 1:
+                shards = [
+                    DOFirewallClient(
+                        settings.do_api_token,
+                        fid,
+                        base_url=settings.do_api_base_url,
+                        timeout=settings.do_api_timeout,
+                    )
+                    for fid in settings.do_firewall_ids
+                ]
+                firewall = ShardedFirewallBlocker(shards)
+            else:
+                firewall = DOFirewallClient(
+                    settings.do_api_token,
+                    settings.do_firewall_ids[0],
+                    base_url=settings.do_api_base_url,
+                    timeout=settings.do_api_timeout,
+                )
 
             if settings.do_load_balancer_ids:
-                from metrics.doblock import FanoutBlocker
                 from metrics.doloadbalancer import DOLoadBalancerClient
 
                 load_balancers = [
@@ -486,13 +498,18 @@ def main():
             f"METRICS: enabled -> mysql://{settings.mysql_user}@{settings.mysql_host}:{settings.mysql_port}/{settings.mysql_database}"
         )
         if settings.do_block_enabled:
+            firewall_label = (
+                f"firewalls {', '.join(settings.do_firewall_ids)}"
+                if len(settings.do_firewall_ids) > 1
+                else f"firewall {settings.do_firewall_id}"
+            )
             if settings.do_load_balancer_ids:
                 print(
-                    f"DO BLOCK: enabled (firewall {settings.do_firewall_id}, "
+                    f"DO BLOCK: enabled ({firewall_label}, "
                     f"load balancers {', '.join(settings.do_load_balancer_ids)})"
                 )
             else:
-                print(f"DO BLOCK: enabled (firewall {settings.do_firewall_id})")
+                print(f"DO BLOCK: enabled ({firewall_label})")
         else:
             print("DO BLOCK: disabled")
     else:

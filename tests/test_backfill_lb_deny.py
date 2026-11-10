@@ -85,8 +85,37 @@ def _lb2_get_body(firewall=None):
     return {"load_balancer": lb}
 
 
+def _firewall2_get_body():
+    # Overlaps "198.51.100.2" with _firewall_get_body() and adds two distinct addresses.
+    rule = {
+        "protocol": "all",
+        "ports": "0",
+        "action": "deny",
+        "sources": {"addresses": ["198.51.100.2", "198.51.100.9", "198.51.100.10"]},
+    }
+    return {
+        "firewall": {
+            "id": "fw-456",
+            "name": "hp-fw-2",
+            "inbound_rules": [rule],
+            "outbound_rules": [],
+        }
+    }
+
+
 # Expected, order-preserved set of managed deny addresses from _firewall_get_body().
 ALL_ADDRESSES = ["198.51.100.1", "203.0.113.0/24", "198.51.100.2", "198.51.100.3"]
+
+# Expected, order-preserved, de-duplicated union of _firewall_get_body() and
+# _firewall2_get_body()'s managed deny addresses.
+UNIONED_ADDRESSES = [
+    "198.51.100.1",
+    "203.0.113.0/24",
+    "198.51.100.2",
+    "198.51.100.3",
+    "198.51.100.9",
+    "198.51.100.10",
+]
 
 
 def _base_environ(base_url):
@@ -351,6 +380,72 @@ def test_show_payload_prints_region(capsys):
 
         assert exit_code == 0
         assert '"region"' in out
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_multi_firewall_union_is_backfilled_to_lbs(capsys):
+    get_routes = {
+        "/v2/firewalls/fw-123": (200, _json_bytes(_firewall_get_body())),
+        "/v2/firewalls/fw-456": (200, _json_bytes(_firewall2_get_body())),
+        "/v2/load_balancers/lb-1": (200, _json_bytes(_lb2_get_body())),
+        "/v2/load_balancers/lb-2": (200, _json_bytes(_lb2_get_body())),
+    }
+    put_routes = {
+        "/v2/load_balancers/lb-1": (200, b""),
+        "/v2/load_balancers/lb-2": (200, b""),
+    }
+    server, thread = make_routed_server(get_routes, put_routes)
+    try:
+        base_url = f"http://127.0.0.1:{server.server_port}"
+        environ = _base_environ(base_url)
+        environ["DO_FIREWALL_IDS"] = "fw-123,fw-456"
+
+        exit_code = main([], dict(environ))
+        out = capsys.readouterr().out
+
+        assert exit_code == 0
+        assert "firewall fw-123 (hp-fw)" in out
+        assert "firewall fw-456 (hp-fw-2)" in out
+
+        expected_deny = [
+            "ip:198.51.100.1",
+            "cidr:203.0.113.0/24",
+            "ip:198.51.100.2",
+            "ip:198.51.100.3",
+            "ip:198.51.100.9",
+            "ip:198.51.100.10",
+        ]
+        put_reqs = [req for req in server.requests if req["method"] == "PUT"]
+        assert len(put_reqs) == 2
+        for req in put_reqs:
+            assert req["body"]["firewall"]["deny"] == expected_deny
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_second_of_two_firewalls_fetch_failure_aborts_before_lb_requests(capsys):
+    get_routes = {
+        "/v2/firewalls/fw-123": (200, _json_bytes(_firewall_get_body())),
+        "/v2/firewalls/fw-456": (500, b""),
+        "/v2/load_balancers/lb-1": (200, _json_bytes(_lb1_get_body())),
+        "/v2/load_balancers/lb-2": (200, _json_bytes(_lb2_get_body())),
+    }
+    server, thread = make_routed_server(get_routes, {})
+    try:
+        base_url = f"http://127.0.0.1:{server.server_port}"
+        environ = _base_environ(base_url)
+        environ["DO_FIREWALL_IDS"] = "fw-123,fw-456"
+
+        exit_code = main([], dict(environ))
+        err = capsys.readouterr().err
+
+        assert exit_code == 1
+        assert "ERROR: firewall fw-456" in err
+        assert all(req["path"].startswith("/v2/firewalls/") for req in server.requests)
+        assert len(server.requests) == 2
     finally:
         server.shutdown()
         thread.join(timeout=5)

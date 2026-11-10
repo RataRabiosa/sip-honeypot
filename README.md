@@ -59,7 +59,8 @@ All variables are documented with comments in `.env.example`. Summary:
 | `METRICS_QUEUE_SIZE` | `10000` | Max in-memory buffered metrics events before new ones are dropped. |
 | `DO_BLOCK_ENABLED` | `false` | Enables automatic DigitalOcean firewall blocking. Requires `METRICS_ENABLED=true`. |
 | `DO_API_TOKEN` | — | DigitalOcean API token with firewall write access. Required if `DO_BLOCK_ENABLED=true`. Keep secret. |
-| `DO_FIREWALL_ID` | — | ID of the pre-existing DigitalOcean firewall whose honeypot-managed deny rule receives blocked IPs. Required if `DO_BLOCK_ENABLED=true`. |
+| `DO_FIREWALL_ID` | — | ID of the pre-existing DigitalOcean firewall whose honeypot-managed deny rule receives blocked IPs. Required if `DO_BLOCK_ENABLED=true` and `DO_FIREWALL_IDS` is not set. |
+| `DO_FIREWALL_IDS` | (empty) | Optional, ordered, comma-separated DigitalOcean firewall IDs to shard deny addresses across once earlier ones fill up. `DO_FIREWALL_ID` remains a valid shorthand for a single-entry list. |
 | `DO_LOAD_BALANCER_IDS` | (empty) | Optional, comma-separated DigitalOcean load balancer IDs. Each one's `firewall.deny` is kept in sync with the honeypot's blocks; `firewall.allow` is never touched. |
 | `DO_API_BASE_URL` | `https://api.digitalocean.com` | DigitalOcean API base URL (override for testing only). |
 | `DO_API_TIMEOUT_SECONDS` | `10` | Timeout for DigitalOcean API calls. |
@@ -122,6 +123,10 @@ Before enabling `DO_BLOCK_ENABLED`:
 - This feature assumes a DigitalOcean firewall already exists (identified by `DO_FIREWALL_ID`); it does not create or provision firewall resources.
 - Only one honeypot process should manage a given `DO_FIREWALL_ID` at a time. Manual edits to that firewall made in the DigitalOcean console/`doctl` while the honeypot is actively blocking may be overwritten, since each update reads and rewrites the whole firewall object.
 - There is no automatic unblocking or TTL — blocked IPs stay blocked until removed manually from the honeypot-managed rule's address list on the DigitalOcean firewall. Removing an IP that way does not reset that IP's `blocked` status in the honeypot's own database.
+
+### Sharding across multiple firewalls
+
+Setting `DO_FIREWALL_IDS` (ordered, comma-separated) raises the effective deny-address cap above DigitalOcean's hard 1,000-per-firewall limit by spilling new blocks across multiple firewalls once earlier ones fill up. Every block attempt starts probing from the first firewall in the list; only a `REMOTE_CAP_REACHED` result advances to the next one, so a full firewall costs one cheap `GET` per attempt rather than being skipped outright, and any other failure (network, malformed response, a non-cap HTTP error) is returned immediately without trying further firewalls. `DO_FIREWALL_ID` continues to work unchanged as a single-entry shorthand and, if set alongside `DO_FIREWALL_IDS`, must match its first entry. `DO_MAX_BLOCKED_IPS` is the operator-tunable total cap across all shards combined — it already counts blocks across every firewall, since it is a single running counter in the worker — so raise it towards `len(firewall ids) * 1000` if you want the honeypot to actually use the extra shard capacity; no code change is needed for that.
 
 ### Mirroring blocks to load balancers
 

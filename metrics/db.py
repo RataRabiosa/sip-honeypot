@@ -123,15 +123,22 @@ class MetricsDB:
                 (ip, when, when, firewall_id),
             )
 
-    def mark_block_result(self, ip: str, ts: float, ok: bool, http_status, error) -> None:
+    def mark_block_result(self, ip: str, ts: float, ok: bool, http_status, error, firewall_id=None) -> None:
         when = _to_naive_utc(ts)
         with self._conn.cursor() as cur:
             if ok:
-                cur.execute(
-                    "UPDATE blocked_ips SET status='blocked', blocked_at=%s, last_http_status=%s, "
-                    "last_error=NULL WHERE src_ip=%s",
-                    (when, http_status, ip),
-                )
+                if firewall_id is not None:
+                    cur.execute(
+                        "UPDATE blocked_ips SET status='blocked', blocked_at=%s, last_http_status=%s, "
+                        "last_error=NULL, firewall_id=%s WHERE src_ip=%s",
+                        (when, http_status, firewall_id, ip),
+                    )
+                else:
+                    cur.execute(
+                        "UPDATE blocked_ips SET status='blocked', blocked_at=%s, last_http_status=%s, "
+                        "last_error=NULL WHERE src_ip=%s",
+                        (when, http_status, ip),
+                    )
             else:
                 if error is not None:
                     error = error[:512]

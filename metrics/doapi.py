@@ -4,7 +4,7 @@ import socket
 import urllib.error
 import urllib.request
 
-DOResult = collections.namedtuple("DOResult", "ok http_status error")
+DOResult = collections.namedtuple("DOResult", "ok http_status error firewall_id", defaults=(None,))
 USER_AGENT = "sip-honeypot/1.0 (+https://github.com/0xNslabs/sip-honeypot)"
 
 

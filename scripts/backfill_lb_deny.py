@@ -11,7 +11,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from metrics.config import ConfigError, parse_load_balancer_ids  # noqa: E402
+from metrics.config import ConfigError, parse_firewall_ids, parse_load_balancer_ids  # noqa: E402
 from metrics.dofirewall import DOFirewallClient  # noqa: E402
 from metrics.doloadbalancer import DOLoadBalancerClient  # noqa: E402
 
@@ -21,6 +21,11 @@ def _build_parser() -> argparse.ArgumentParser:
         description="Copy a DigitalOcean firewall's managed deny addresses into one or more load balancers."
     )
     parser.add_argument("--firewall-id", default=None, help="DigitalOcean firewall ID (default: DO_FIREWALL_ID)")
+    parser.add_argument(
+        "--firewall-ids",
+        default=None,
+        help="Comma-separated DigitalOcean firewall IDs (default: DO_FIREWALL_IDS)",
+    )
     parser.add_argument(
         "--load-balancer-ids",
         default=None,
@@ -52,6 +57,7 @@ def main(argv=None, environ=None) -> int:
 
     token = environ.get("DO_API_TOKEN")
     firewall_id = args.firewall_id if args.firewall_id is not None else environ.get("DO_FIREWALL_ID")
+    raw_firewall_ids = args.firewall_ids if args.firewall_ids is not None else environ.get("DO_FIREWALL_IDS")
     raw_lb_ids = args.load_balancer_ids if args.load_balancer_ids is not None else environ.get("DO_LOAD_BALANCER_IDS")
     base_url = (
         args.base_url if args.base_url is not None else environ.get("DO_API_BASE_URL", "https://api.digitalocean.com")
@@ -72,9 +78,17 @@ def main(argv=None, environ=None) -> int:
     if not token:
         print("ERROR: DO_API_TOKEN is required (set it in the environment or .env)", file=sys.stderr)
         return 2
-    if not firewall_id:
-        print("ERROR: --firewall-id or DO_FIREWALL_ID is required", file=sys.stderr)
+
+    try:
+        firewall_ids = parse_firewall_ids(raw_firewall_ids)
+    except ConfigError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
         return 2
+    if not firewall_ids:
+        if not firewall_id:
+            print("ERROR: --firewall-id or DO_FIREWALL_ID is required", file=sys.stderr)
+            return 2
+        firewall_ids = (firewall_id,)
 
     try:
         lb_ids = parse_load_balancer_ids(raw_lb_ids)
@@ -88,14 +102,23 @@ def main(argv=None, environ=None) -> int:
         )
         return 2
 
-    firewall_client = DOFirewallClient(token, firewall_id, base_url=base_url, timeout=timeout)
-    res, firewall = firewall_client.fetch()
-    if not res.ok:
-        print(f"ERROR: firewall {firewall_id}: {res.error}", file=sys.stderr)
-        return 1
+    addresses = []
+    seen_addresses = set()
+    for fw_id in firewall_ids:
+        firewall_client = DOFirewallClient(token, fw_id, base_url=base_url, timeout=timeout)
+        res, firewall = firewall_client.fetch()
+        if not res.ok:
+            print(f"ERROR: firewall {fw_id}: {res.error}", file=sys.stderr)
+            return 1
 
-    addresses = DOFirewallClient.managed_deny_addresses(firewall)
-    print(f"firewall {firewall_id} ({firewall.get('name')}): {len(addresses)} managed deny addresses")
+        fw_addresses = DOFirewallClient.managed_deny_addresses(firewall)
+        print(f"firewall {fw_id} ({firewall.get('name')}): {len(fw_addresses)} managed deny addresses")
+        for addr in fw_addresses:
+            if addr in seen_addresses:
+                continue
+            seen_addresses.add(addr)
+            addresses.append(addr)
+
     if len(addresses) == 0:
         print("nothing to backfill")
         return 0

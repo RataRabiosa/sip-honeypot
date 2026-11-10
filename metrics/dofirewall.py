@@ -23,6 +23,10 @@ class DOFirewallClient:
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout
 
+    @property
+    def firewall_id(self) -> str:
+        return self._firewall_id
+
     @staticmethod
     def is_managed_rule(rule: dict) -> bool:
         if not isinstance(rule, dict):
@@ -207,12 +211,12 @@ class DOFirewallClient:
         """GET the firewall and return (DOResult, firewall_dict_or_None)."""
         get_status, get_body, get_error = self._request("GET", f"/v2/firewalls/{self._firewall_id}")
         if get_error is not None:
-            return DOResult(False, get_status, get_error), None
+            return DOResult(False, get_status, get_error, self._firewall_id), None
 
         firewall, parse_error = parse_object(get_body, "firewall", "MALFORMED_FIREWALL_RESPONSE")
         if parse_error is not None:
-            return DOResult(False, get_status, parse_error), None
-        return DOResult(True, get_status, None), firewall
+            return DOResult(False, get_status, parse_error, self._firewall_id), None
+        return DOResult(True, get_status, None, self._firewall_id), firewall
 
     def add_deny_rule(self, ip: str) -> DOResult:
         res, firewall = self.fetch()
@@ -221,13 +225,13 @@ class DOFirewallClient:
 
         plan = self.plan_update(firewall, ip)
         if plan.already_present:
-            return DOResult(True, res.http_status, None)
+            return DOResult(True, res.http_status, None, self._firewall_id)
         if plan.error is not None:
             if plan.error.startswith("MALFORMED_FIREWALL_RESPONSE"):
-                return DOResult(False, res.http_status, plan.error)
-            return DOResult(False, None, plan.error)
+                return DOResult(False, res.http_status, plan.error, self._firewall_id)
+            return DOResult(False, None, plan.error, self._firewall_id)
 
         put_status, _put_body, put_error = self._request("PUT", f"/v2/firewalls/{self._firewall_id}", body=plan.payload)
         if put_error is not None:
-            return DOResult(False, put_status, put_error)
-        return DOResult(True, put_status, None)
+            return DOResult(False, put_status, put_error, self._firewall_id)
+        return DOResult(True, put_status, None, self._firewall_id)

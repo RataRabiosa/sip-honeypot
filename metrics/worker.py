@@ -215,7 +215,7 @@ class MetricsWorker:
 
         self._db.mark_block_pending(ip, now, self._settings.do_firewall_id)
         res = self._firewall.add_deny_rule(ip)
-        self._db.mark_block_result(ip, self._clock(), res.ok, res.http_status, res.error)
+        self._db.mark_block_result(ip, self._clock(), res.ok, res.http_status, res.error, res.firewall_id)
 
         if res.ok:
             self._known_blocked.add(ip)

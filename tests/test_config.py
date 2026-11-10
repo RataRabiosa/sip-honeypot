@@ -1,6 +1,6 @@
 import pytest
 
-from metrics.config import ConfigError, load_settings, parse_load_balancer_ids
+from metrics.config import ConfigError, load_settings, parse_firewall_ids, parse_load_balancer_ids
 
 
 def test_defaults_minimal_environ(tmp_path):
@@ -23,6 +23,7 @@ def test_defaults_minimal_environ(tmp_path):
     assert settings.do_failure_cooldown == 60
     assert settings.do_max_blocked_ips == 1000
     assert settings.do_load_balancer_ids == ()
+    assert settings.do_firewall_ids == ()
 
 
 @pytest.mark.parametrize(
@@ -180,3 +181,64 @@ def test_parse_load_balancer_ids_strips_and_skips_blanks_preserving_order():
 def test_parse_load_balancer_ids_duplicate_raises():
     with pytest.raises(ConfigError):
         parse_load_balancer_ids("a,b,a")
+
+
+def test_parse_firewall_ids_none_and_empty():
+    assert parse_firewall_ids(None) == ()
+    assert parse_firewall_ids("") == ()
+
+
+def test_parse_firewall_ids_strips_and_skips_blanks_preserving_order():
+    assert parse_firewall_ids(" a , b ,,c ,") == ("a", "b", "c")
+
+
+def test_parse_firewall_ids_duplicate_raises():
+    with pytest.raises(ConfigError) as exc_info:
+        parse_firewall_ids("fw-1,fw-2,fw-1")
+    assert "DO_FIREWALL_IDS contains a duplicate entry: 'fw-1'" in str(exc_info.value)
+
+
+def test_do_firewall_ids_set_without_do_firewall_id(tmp_path):
+    settings = load_settings(str(tmp_path), environ={"DO_FIREWALL_IDS": "fw-1,fw-2,fw-3"})
+    assert settings.do_firewall_ids == ("fw-1", "fw-2", "fw-3")
+    assert settings.do_firewall_id == "fw-1"
+
+
+def test_do_firewall_ids_and_mismatched_do_firewall_id_raises(tmp_path):
+    with pytest.raises(ConfigError) as exc_info:
+        load_settings(
+            str(tmp_path),
+            environ={"DO_FIREWALL_IDS": "fw-1,fw-2", "DO_FIREWALL_ID": "fw-2"},
+        )
+    assert "DO_FIREWALL_ID" in str(exc_info.value)
+    assert "DO_FIREWALL_IDS" in str(exc_info.value)
+
+
+def test_do_firewall_ids_and_matching_do_firewall_id_is_ok(tmp_path):
+    settings = load_settings(
+        str(tmp_path),
+        environ={"DO_FIREWALL_IDS": "fw-1,fw-2", "DO_FIREWALL_ID": "fw-1"},
+    )
+    assert settings.do_firewall_ids == ("fw-1", "fw-2")
+    assert settings.do_firewall_id == "fw-1"
+
+
+def test_only_do_firewall_id_set_back_compat(tmp_path):
+    settings = load_settings(str(tmp_path), environ={"DO_FIREWALL_ID": "fw-only"})
+    assert settings.do_firewall_ids == ("fw-only",)
+    assert settings.do_firewall_id == "fw-only"
+
+
+def test_neither_do_firewall_id_nor_ids_with_do_block_enabled_raises(tmp_path):
+    with pytest.raises(ConfigError):
+        load_settings(
+            str(tmp_path),
+            environ={
+                "METRICS_ENABLED": "true",
+                "MYSQL_HOST": "db",
+                "MYSQL_USER": "u",
+                "MYSQL_PASSWORD": "pw",
+                "DO_BLOCK_ENABLED": "true",
+                "DO_API_TOKEN": "tok",
+            },
+        )
