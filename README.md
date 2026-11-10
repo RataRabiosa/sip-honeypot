@@ -68,6 +68,7 @@ All variables are documented with comments in `.env.example`. Summary:
 | `DO_RETRY_INTERVAL_SECONDS` | `300` | Minimum seconds between retrying a block attempt for the same IP. |
 | `DO_FAILURE_COOLDOWN_SECONDS` | `60` | Seconds to pause all new block attempts after a DigitalOcean API failure. |
 | `DO_MAX_BLOCKED_IPS` | `1000` | Local cap on the number of IPs this honeypot will block (counted from its own database). DigitalOcean separately caps addresses across all deny rules at 1,000 combined; the client refuses to exceed that remote limit. |
+| `DO_BLOCK_TTL_SECONDS` | `604800` | Inactivity TTL (seconds) after which a blocked IP is automatically removed from the firewall/LB deny lists. The clock resets on any new activity from that IP. `0` disables auto-expiry entirely. Must be `0` or `>= 60`. |
 | `WEB_PORT` | `8080` | Port the dashboard listens on / is published as. |
 | `WEB_BIND_HOST` | `127.0.0.1` | Host interface the dashboard port is published on. |
 | `WEB_BASIC_AUTH_ENABLED` | `false` | Enables HTTP Basic Auth on the dashboard (additional layer, off by default). |
@@ -122,7 +123,7 @@ Before enabling `DO_BLOCK_ENABLED`:
 - DigitalOcean caps firewalls at 50 total rule objects and at 1,000 addresses combined across deny rules. This honeypot packs IPs into one managed rule specifically to stay within the 1,000-address ceiling instead of the 50-rule-object one — it is still not an unlimited blocklist. `DO_MAX_BLOCKED_IPS` and the remote 1,000-address cap are independent: hitting either one stops new blocks (visible as `LOCAL_CAP_REACHED` or `REMOTE_CAP_REACHED` in the dashboard/last_error).
 - This feature assumes a DigitalOcean firewall already exists (identified by `DO_FIREWALL_ID`); it does not create or provision firewall resources.
 - Only one honeypot process should manage a given `DO_FIREWALL_ID` at a time. Manual edits to that firewall made in the DigitalOcean console/`doctl` while the honeypot is actively blocking may be overwritten, since each update reads and rewrites the whole firewall object.
-- There is no automatic unblocking or TTL — blocked IPs stay blocked until removed manually from the honeypot-managed rule's address list on the DigitalOcean firewall. Removing an IP that way does not reset that IP's `blocked` status in the honeypot's own database.
+- Blocked IPs auto-expire after `DO_BLOCK_TTL_SECONDS` (default 7 days) of inactivity from that IP, since this is a honeypot: it keeps receiving and logging traffic from IPs it has blocked elsewhere, so `source_ips.last_seen` is a live signal of continued activity. Any new activity from a blocked IP resets its TTL clock; set `DO_BLOCK_TTL_SECONDS=0` to disable auto-expiry and keep blocks permanent. Removal uses the exact firewall shard that originally blocked the IP, so it works correctly with `DO_FIREWALL_IDS` sharding. A failed removal attempt lands the IP in an `unblocking` status, retried via the same cadence as failed blocks (`DO_RETRY_INTERVAL_SECONDS`) until it succeeds.
 
 ### Sharding across multiple firewalls
 

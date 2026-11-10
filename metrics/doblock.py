@@ -28,6 +28,16 @@ class FanoutBlocker:
                 return DOResult(False, lb_res.http_status, f"LB {lb.lb_id}: {lb_res.error}")
         return res
 
+    def remove_deny_rule(self, ip: str, firewall_id: str = None) -> DOResult:
+        res = self._firewall.remove_deny_rule(ip, firewall_id)
+        if not res.ok:
+            return res
+        for lb in self._load_balancers:
+            lb_res = lb.remove_deny_rule(ip)
+            if not lb_res.ok:
+                return DOResult(False, lb_res.http_status, f"LB {lb.lb_id}: {lb_res.error}")
+        return res
+
 
 class ShardedFirewallBlocker:
     """Duck-type compatible with DOFirewallClient for the worker.
@@ -42,6 +52,7 @@ class ShardedFirewallBlocker:
 
     def __init__(self, shards):
         self._shards = list(shards)
+        self._by_id = {shard.firewall_id: shard for shard in self._shards}
 
     def add_deny_rule(self, ip: str) -> DOResult:
         result = None
@@ -53,3 +64,9 @@ class ShardedFirewallBlocker:
                 continue
             return result
         return result
+
+    def remove_deny_rule(self, ip: str, firewall_id: str = None) -> DOResult:
+        shard = self._by_id.get(firewall_id)
+        if shard is None:
+            return DOResult(False, None, f"UNKNOWN_FIREWALL_ID: {firewall_id!r}", firewall_id)
+        return shard.remove_deny_rule(ip, firewall_id)

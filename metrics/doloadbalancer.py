@@ -8,6 +8,7 @@ from metrics.doapi import parse_object
 from metrics.doapi import request as _do_request
 
 LBUpdatePlan = collections.namedtuple("LBUpdatePlan", "payload added error")
+LBRemovePlan = collections.namedtuple("LBRemovePlan", "payload removed error")
 
 
 class DOLoadBalancerClient:
@@ -102,6 +103,70 @@ class DOLoadBalancerClient:
 
         return LBUpdatePlan(payload, tuple(added), None)
 
+    @staticmethod
+    def plan_removal(load_balancer: dict, addresses) -> "LBRemovePlan":
+        if not isinstance(load_balancer, dict):
+            return LBRemovePlan(None, (), "MALFORMED_LOAD_BALANCER_RESPONSE: load balancer is not an object")
+
+        name = load_balancer.get("name")
+        if not isinstance(name, str) or not name:
+            return LBRemovePlan(None, (), "MALFORMED_LOAD_BALANCER_RESPONSE: missing or invalid 'name'")
+
+        if not isinstance(load_balancer.get("forwarding_rules"), list):
+            return LBRemovePlan(None, (), "MALFORMED_LOAD_BALANCER_RESPONSE: missing or invalid 'forwarding_rules'")
+
+        region = load_balancer.get("region")
+        if isinstance(region, dict):
+            slug = region.get("slug")
+            if not isinstance(slug, str) or not slug:
+                return LBRemovePlan(None, (), "MALFORMED_LOAD_BALANCER_RESPONSE: missing or invalid 'region'")
+        elif isinstance(region, str) and region:
+            slug = region
+        else:
+            return LBRemovePlan(None, (), "MALFORMED_LOAD_BALANCER_RESPONSE: missing or invalid 'region'")
+
+        firewall = load_balancer.get("firewall")
+        if firewall is None:
+            firewall = {}
+        if not isinstance(firewall, dict):
+            return LBRemovePlan(None, (), "MALFORMED_LOAD_BALANCER_RESPONSE: invalid 'firewall' shape")
+
+        deny = firewall.get("deny")
+        if deny is None:
+            deny = []
+        if not isinstance(deny, list) or any(not isinstance(entry, str) for entry in deny):
+            return LBRemovePlan(None, (), "MALFORMED_LOAD_BALANCER_RESPONSE: invalid 'firewall.deny' shape")
+
+        allow = firewall.get("allow")
+        if allow is None:
+            allow = []
+        if not isinstance(allow, list) or any(not isinstance(entry, str) for entry in allow):
+            return LBRemovePlan(None, (), "MALFORMED_LOAD_BALANCER_RESPONSE: invalid 'firewall.allow' shape")
+
+        entries_to_remove = set()
+        for address in addresses:
+            try:
+                entries_to_remove.add(DOLoadBalancerClient.deny_entry(address))
+            except (ValueError, TypeError):
+                return LBRemovePlan(None, (), f"INVALID_ADDRESS: {address!r}")
+
+        removed = [e for e in deny if e in entries_to_remove]
+        if not removed:
+            return LBRemovePlan(None, (), None)
+
+        new_deny = [e for e in deny if e not in entries_to_remove]
+        payload = copy.deepcopy(load_balancer)
+        for field in DOLoadBalancerClient.READ_ONLY_FIELDS:
+            payload.pop(field, None)
+        payload["region"] = slug
+        if isinstance(payload.get("tag"), str) and payload.get("tag"):
+            payload.pop("droplet_ids", None)
+        else:
+            payload.pop("tag", None)
+            payload["droplet_ids"] = list(load_balancer.get("droplet_ids") or [])
+        payload["firewall"] = {"deny": new_deny, "allow": list(allow)}
+        return LBRemovePlan(payload, tuple(removed), None)
+
     def _request(self, method: str, path: str, body: dict = None):
         return _do_request(self._base_url, self._token, self._timeout, method, path, body)
 
@@ -138,3 +203,21 @@ class DOLoadBalancerClient:
 
     def add_deny_rule(self, ip: str) -> DOResult:
         return self.add_deny_entries([ip])
+
+    def remove_deny_entries(self, addresses) -> DOResult:
+        res, load_balancer = self.fetch()
+        if not res.ok:
+            return res
+
+        plan = self.plan_removal(load_balancer, addresses)
+        if plan.error is not None:
+            if plan.error.startswith("MALFORMED_LOAD_BALANCER_RESPONSE"):
+                return DOResult(False, res.http_status, plan.error)
+            return DOResult(False, None, plan.error)
+        if not plan.removed:
+            return DOResult(True, res.http_status, None)
+
+        return self.update(plan.payload)
+
+    def remove_deny_rule(self, ip: str) -> DOResult:
+        return self.remove_deny_entries([ip])

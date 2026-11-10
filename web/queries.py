@@ -104,7 +104,7 @@ def _range_dashboard_data(
     distinct_ips = cur.fetchone()["n"]
 
     cur.execute("SELECT status, COUNT(*) AS n FROM blocked_ips GROUP BY status")
-    status_counts = {"blocked": 0, "failed": 0, "pending": 0}
+    status_counts = {"blocked": 0, "failed": 0, "pending": 0, "unblocking": 0, "expired": 0}
     for row in cur.fetchall():
         if row["status"] in status_counts:
             status_counts[row["status"]] = row["n"]
@@ -166,6 +166,8 @@ def _range_dashboard_data(
             "blocked": status_counts["blocked"],
             "failed": status_counts["failed"],
             "pending": status_counts["pending"],
+            "unblocking": status_counts["unblocking"],
+            "expired": status_counts["expired"],
         },
         "timeseries": {"labels": labels, "values": values},
         "methods": methods,
@@ -195,7 +197,7 @@ def dashboard_data(conn, hours: int = 24, start=None, end=None, blocked_page: in
     distinct_ips = cur.fetchone()["n"]
 
     cur.execute("SELECT status, COUNT(*) AS n FROM blocked_ips GROUP BY status")
-    status_counts = {"blocked": 0, "failed": 0, "pending": 0}
+    status_counts = {"blocked": 0, "failed": 0, "pending": 0, "unblocking": 0, "expired": 0}
     for row in cur.fetchall():
         if row["status"] in status_counts:
             status_counts[row["status"]] = row["n"]
@@ -247,6 +249,8 @@ def dashboard_data(conn, hours: int = 24, start=None, end=None, blocked_page: in
             "blocked": status_counts["blocked"],
             "failed": status_counts["failed"],
             "pending": status_counts["pending"],
+            "unblocking": status_counts["unblocking"],
+            "expired": status_counts["expired"],
         },
         "timeseries": {"labels": labels, "values": values},
         "methods": methods,

@@ -392,6 +392,144 @@ def test_add_deny_rule_handles_connection_failure():
     assert TOKEN not in (result.error or "")
 
 
+def test_remove_deny_rule_removes_present_entry():
+    get_body = _lb_body(firewall={"deny": ["ip:198.51.100.1", "ip:198.51.100.9"], "allow": ["ip:203.0.113.5"]})
+    server, thread = _make_server(
+        get_response_code=200,
+        get_response_body=_json_bytes(get_body),
+        put_response_code=200,
+        put_response_body=b"",
+    )
+    try:
+        base_url = f"http://127.0.0.1:{server.server_port}"
+        client = DOLoadBalancerClient(TOKEN, "lb-123", base_url=base_url, timeout=5.0)
+        result = client.remove_deny_rule("198.51.100.9")
+
+        assert len(server.requests) == 2
+        put_req = server.requests[1]
+        assert put_req["method"] == "PUT"
+        put_body = put_req["body"]
+        assert put_body["firewall"]["deny"] == ["ip:198.51.100.1"]
+        assert put_body["firewall"]["allow"] == ["ip:203.0.113.5"]
+
+        assert result.ok is True
+        assert result.http_status == 200
+        assert result.error is None
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_remove_deny_rule_address_not_present_no_put():
+    get_body = _lb_body(firewall={"deny": ["ip:198.51.100.1"], "allow": []})
+    server, thread = _make_server(get_response_code=200, get_response_body=_json_bytes(get_body))
+    try:
+        base_url = f"http://127.0.0.1:{server.server_port}"
+        client = DOLoadBalancerClient(TOKEN, "lb-123", base_url=base_url, timeout=5.0)
+        result = client.remove_deny_rule("198.51.100.99")
+
+        assert len(server.requests) == 1
+        assert server.requests[0]["method"] == "GET"
+        assert result.ok is True
+        assert result.http_status == 200
+        assert result.error is None
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_remove_deny_entries_batch_mixed_present_and_absent():
+    get_body = _lb_body(firewall={"deny": ["ip:198.51.100.1", "cidr:203.0.113.0/24"], "allow": []})
+    server, thread = _make_server(
+        get_response_code=200,
+        get_response_body=_json_bytes(get_body),
+        put_response_code=200,
+        put_response_body=b"",
+    )
+    try:
+        base_url = f"http://127.0.0.1:{server.server_port}"
+        client = DOLoadBalancerClient(TOKEN, "lb-123", base_url=base_url, timeout=5.0)
+        result = client.remove_deny_entries(["198.51.100.1", "198.51.100.77", "203.0.113.0/24"])
+
+        put_body = server.requests[1]["body"]
+        assert put_body["firewall"]["deny"] == []
+        assert result.ok is True
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_remove_deny_rule_invalid_address_no_put():
+    get_body = _lb_body()
+    server, thread = _make_server(get_response_code=200, get_response_body=_json_bytes(get_body))
+    try:
+        base_url = f"http://127.0.0.1:{server.server_port}"
+        client = DOLoadBalancerClient(TOKEN, "lb-123", base_url=base_url, timeout=5.0)
+        result = client.remove_deny_rule("not-an-ip")
+
+        assert len(server.requests) == 1
+        assert server.requests[0]["method"] == "GET"
+        assert result.ok is False
+        assert result.http_status is None
+        assert (result.error or "").startswith("INVALID_ADDRESS")
+        assert TOKEN not in (result.error or "")
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+@pytest.mark.parametrize(
+    "lb",
+    [
+        _malformed_lb(name=""),
+        _malformed_lb(name=None),
+        _malformed_lb(forwarding_rules="not-a-list"),
+        _malformed_lb(region=None),
+        _malformed_lb(region={"name": "New York 3"}),
+        _malformed_lb(firewall="not-a-dict"),
+        _malformed_lb(firewall={"deny": "not-a-list", "allow": []}),
+        _malformed_lb(firewall={"deny": ["ip:1.2.3.4", 5], "allow": []}),
+    ],
+    ids=[
+        "empty-name",
+        "null-name",
+        "forwarding-rules-not-list",
+        "region-missing",
+        "region-dict-no-slug",
+        "firewall-not-dict",
+        "deny-not-list",
+        "deny-contains-non-string",
+    ],
+)
+def test_remove_deny_rule_handles_malformed_lb_shape(lb):
+    get_body = {"load_balancer": lb}
+    server, thread = _make_server(get_response_code=200, get_response_body=_json_bytes(get_body))
+    try:
+        base_url = f"http://127.0.0.1:{server.server_port}"
+        client = DOLoadBalancerClient(TOKEN, "lb-123", base_url=base_url, timeout=5.0)
+        result = client.remove_deny_rule("198.51.100.7")
+
+        assert result.ok is False
+        assert (result.error or "").startswith("MALFORMED_LOAD_BALANCER_RESPONSE")
+        assert TOKEN not in (result.error or "")
+        assert len(server.requests) == 1
+        assert server.requests[0]["method"] == "GET"
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_plan_removal_does_not_mutate_input_load_balancer():
+    lb = _lb_body(firewall={"deny": ["ip:198.51.100.1", "ip:198.51.100.9"], "allow": []})["load_balancer"]
+    before = copy.deepcopy(lb)
+
+    plan = DOLoadBalancerClient.plan_removal(lb, ["198.51.100.9"])
+
+    assert lb == before
+    assert lb["firewall"]["deny"] == ["ip:198.51.100.1", "ip:198.51.100.9"]
+    assert plan.payload["firewall"]["deny"] == ["ip:198.51.100.1"]
+
+
 def test_plan_update_does_not_mutate_input_load_balancer():
     lb = _lb_body()["load_balancer"]
     before = copy.deepcopy(lb)

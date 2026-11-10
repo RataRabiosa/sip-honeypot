@@ -29,6 +29,15 @@ class MetricsWorker:
     # backlog of failed IPs could make one sweep tick block for a long time.
     _MAX_SWEEP_RETRIES_PER_TICK = 500
 
+    # How often (seconds) the worker checks for TTL-expired blocks. Independent
+    # of _SWEEP_POLL_INTERVAL/do_retry_interval since expiry checking is a much
+    # lower-frequency concern than the failed-block retry sweep.
+    _EXPIRY_SWEEP_INTERVAL = 600.0
+
+    # Cap on expired/stuck-unblocking IPs processed in a single sweep tick, for
+    # the same reason _MAX_SWEEP_RETRIES_PER_TICK bounds the failed-block sweep.
+    _MAX_EXPIRIES_PER_TICK = 50
+
     def __init__(self, settings, db, firewall, log_fn, clock=time.time):
         self._settings = settings
         self._db = db
@@ -44,6 +53,7 @@ class MetricsWorker:
         self._cooldown_until = 0.0
         self._blocked_count = 0
         self._next_sweep_at = 0.0
+        self._next_expiry_sweep_at = 0.0
         self.submitted = 0
         self.processed = 0
         self.dropped = 0
@@ -79,6 +89,7 @@ class MetricsWorker:
                 item = self._queue.get(timeout=self._SWEEP_POLL_INTERVAL)
             except queue.Empty:
                 self._maybe_sweep_failed_blocks()
+                self._maybe_sweep_expired_blocks()
                 continue
             if item is self._STOP:
                 break
@@ -88,6 +99,7 @@ class MetricsWorker:
             except Exception as e:
                 self._log(f"METRICS_WORKER_ERROR - {type(e).__name__}: {e}")
             self._maybe_sweep_failed_blocks()
+            self._maybe_sweep_expired_blocks()
         try:
             self._db.close()
         except Exception:
@@ -163,6 +175,74 @@ class MetricsWorker:
             except Exception as e:
                 self._log(f"METRICS_WORKER_ERROR - {type(e).__name__}: {e}")
 
+    def _maybe_sweep_expired_blocks(self):
+        now = self._clock()
+        if now < self._next_expiry_sweep_at:
+            return
+        self._next_expiry_sweep_at = now + self._EXPIRY_SWEEP_INTERVAL
+
+        if self._settings.do_block_ttl <= 0:
+            return
+        if self._firewall is None:
+            return
+        if not self._ensure_db():
+            return
+
+        expiry_cutoff = now - self._settings.do_block_ttl
+        try:
+            expired = self._db.list_expired_blocked_ips(expiry_cutoff, self._MAX_EXPIRIES_PER_TICK)
+        except (pymysql.err.OperationalError, pymysql.err.InterfaceError) as e:
+            self._db.close()
+            self._next_db_connect_at = self._clock() + 5.0
+            self.db_errors += 1
+            self._log(f"METRICS_DB - error: {type(e).__name__}: {e}")
+            return
+        except pymysql.err.Error as e:
+            self._log(f"METRICS_DB - error: {type(e).__name__}: {e}")
+            return
+
+        for row in expired:
+            try:
+                self._expire_block(row["src_ip"], row["firewall_id"])
+            except Exception as e:
+                self._log(f"METRICS_WORKER_ERROR - {type(e).__name__}: {e}")
+
+        retry_cutoff = now - self._settings.do_retry_interval
+        try:
+            retrying = self._db.list_unblocking_ips_for_retry(retry_cutoff, self._MAX_EXPIRIES_PER_TICK)
+        except (pymysql.err.OperationalError, pymysql.err.InterfaceError) as e:
+            self._db.close()
+            self._next_db_connect_at = self._clock() + 5.0
+            self.db_errors += 1
+            self._log(f"METRICS_DB - error: {type(e).__name__}: {e}")
+            return
+        except pymysql.err.Error as e:
+            self._log(f"METRICS_DB - error: {type(e).__name__}: {e}")
+            return
+
+        for row in retrying:
+            try:
+                self._expire_block(row["src_ip"], row["firewall_id"])
+            except Exception as e:
+                self._log(f"METRICS_WORKER_ERROR - {type(e).__name__}: {e}")
+
+    def _expire_block(self, ip, firewall_id):
+        self._db.mark_unblock_pending(ip, self._clock())
+        res = self._firewall.remove_deny_rule(ip, firewall_id)
+        self._db.mark_unblock_result(ip, self._clock(), res.ok, res.http_status, res.error)
+
+        if res.ok:
+            self._forget_blocked(ip)
+            self._log(f"DO_UNBLOCK - expired {ip} (TTL, firewall {firewall_id})")
+        else:
+            self._log(f"DO_UNBLOCK - FAILED {ip} status={res.http_status} error={(res.error or '')[:200]}")
+
+    def _forget_blocked(self, ip):
+        self._known_blocked.discard(ip)
+        if self._blocked_count > 0:
+            self._blocked_count -= 1
+        self._next_attempt_at.pop(ip, None)
+
     def _bounded_set_add(self, ordered_dict, key):
         """Insert key into an OrderedDict used as an ordered set, evicting the
         oldest entry first if the structure would exceed _MAX_DEDUP_ENTRIES."""
@@ -197,7 +277,7 @@ class MetricsWorker:
             return
 
         state = self._db.get_block_state(ip)
-        if state and state["status"] == "blocked":
+        if state and state["status"] in ("blocked", "unblocking"):
             self._known_blocked.add(ip)
             return
         if state:

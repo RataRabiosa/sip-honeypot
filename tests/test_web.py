@@ -237,6 +237,27 @@ def test_index_blocked_search_escapes_like_wildcards(app_with_fake_db):
     assert params[0] == "%1.2.3\\%%"
 
 
+def test_index_status_totals_include_unblocking_and_expired(app_with_fake_db, monkeypatch):
+    app, conn = app_with_fake_db
+    monkeypatch.setitem(
+        globals(),
+        "STATUS_ROWS",
+        [
+            {"status": "blocked", "n": 2},
+            {"status": "failed", "n": 1},
+            {"status": "pending", "n": 3},
+            {"status": "unblocking", "n": 5},
+            {"status": "expired", "n": 7},
+        ],
+    )
+    client = app.test_client()
+    resp = client.get("/")
+    assert resp.status_code == 200
+    html = resp.get_data(as_text=True)
+    assert '<div class="n">5</div><div class="l">Unblocking (TTL)</div>' in html
+    assert '<div class="n">7</div><div class="l">Expired (TTL)</div>' in html
+
+
 def test_index_blocked_page_param_used_for_offset(app_with_fake_db, monkeypatch):
     app, conn = app_with_fake_db
     # Give a big enough total that page 2 is in range (2 of 4 pages at 25/page).

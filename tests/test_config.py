@@ -24,6 +24,7 @@ def test_defaults_minimal_environ(tmp_path):
     assert settings.do_max_blocked_ips == 1000
     assert settings.do_load_balancer_ids == ()
     assert settings.do_firewall_ids == ()
+    assert settings.do_block_ttl == 604800
 
 
 @pytest.mark.parametrize(
@@ -227,6 +228,33 @@ def test_only_do_firewall_id_set_back_compat(tmp_path):
     settings = load_settings(str(tmp_path), environ={"DO_FIREWALL_ID": "fw-only"})
     assert settings.do_firewall_ids == ("fw-only",)
     assert settings.do_firewall_id == "fw-only"
+
+
+def test_do_block_ttl_explicit_valid_value(tmp_path):
+    settings = load_settings(str(tmp_path), environ={"DO_BLOCK_TTL_SECONDS": "3600"})
+    assert settings.do_block_ttl == 3600
+
+
+def test_do_block_ttl_zero_disables(tmp_path):
+    settings = load_settings(str(tmp_path), environ={"DO_BLOCK_TTL_SECONDS": "0"})
+    assert settings.do_block_ttl == 0
+
+
+def test_do_block_ttl_between_one_and_fifty_nine_raises(tmp_path):
+    with pytest.raises(ConfigError) as exc_info:
+        load_settings(str(tmp_path), environ={"DO_BLOCK_TTL_SECONDS": "30"})
+    assert "DO_BLOCK_TTL_SECONDS" in str(exc_info.value)
+
+
+def test_do_block_ttl_non_numeric_raises(tmp_path):
+    with pytest.raises(ConfigError) as exc_info:
+        load_settings(str(tmp_path), environ={"DO_BLOCK_TTL_SECONDS": "not-a-number"})
+    assert "DO_BLOCK_TTL_SECONDS must be a number, got: 'not-a-number'" in str(exc_info.value)
+
+
+def test_do_block_ttl_boundary_60_is_accepted(tmp_path):
+    settings = load_settings(str(tmp_path), environ={"DO_BLOCK_TTL_SECONDS": "60"})
+    assert settings.do_block_ttl == 60
 
 
 def test_neither_do_firewall_id_nor_ids_with_do_block_enabled_raises(tmp_path):

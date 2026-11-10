@@ -38,6 +38,7 @@ class Settings:
     do_retry_interval: float
     do_failure_cooldown: float
     do_max_blocked_ips: int
+    do_block_ttl: float
 
 
 def _get_bool(environ: Mapping[str, str], key: str, default: bool) -> bool:
@@ -199,6 +200,10 @@ def load_settings(script_dir: str, environ: Optional[Mapping[str, str]] = None) 
     if do_max_blocked_ips < 1:
         raise ConfigError(f"DO_MAX_BLOCKED_IPS must be >= 1, got: {do_max_blocked_ips}")
 
+    do_block_ttl = _get_float(environ, "DO_BLOCK_TTL_SECONDS", 604800)
+    if do_block_ttl != 0 and do_block_ttl < 60:
+        raise ConfigError(f"DO_BLOCK_TTL_SECONDS must be 0 (disabled) or >= 60, got: {do_block_ttl}")
+
     return Settings(
         sip_host=sip_host,
         sip_port=sip_port,
@@ -223,4 +228,5 @@ def load_settings(script_dir: str, environ: Optional[Mapping[str, str]] = None) 
         do_retry_interval=do_retry_interval,
         do_failure_cooldown=do_failure_cooldown,
         do_max_blocked_ips=do_max_blocked_ips,
+        do_block_ttl=do_block_ttl,
     )

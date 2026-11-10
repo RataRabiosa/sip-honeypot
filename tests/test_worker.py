@@ -73,15 +73,56 @@ class FakeDB:
         candidates.sort(key=lambda pair: pair[1])
         return [ip for ip, _ in candidates[:limit]]
 
+    def mark_unblock_pending(self, ip, ts):
+        st = self.state.setdefault(ip, {"status": "blocked", "attempts": 0, "last_attempt_at": _utc(ts)})
+        st["status"] = "unblocking"
+        st["attempts"] += 1
+        st["last_attempt_at"] = _utc(ts)
+
+    def mark_unblock_result(self, ip, ts, ok, http_status, error):
+        st = self.state.setdefault(ip, {"status": "unblocking", "attempts": 1, "last_attempt_at": _utc(ts)})
+        if ok:
+            st["status"] = "expired"
+            self.blocked_ips.discard(ip)
+        else:
+            st["status"] = "unblocking"
+            st["last_error"] = error
+
+    def list_expired_blocked_ips(self, before_ts, limit):
+        cutoff = _utc(before_ts)
+        candidates = [
+            (ip, st["last_attempt_at"], st.get("firewall_id"))
+            for ip, st in self.state.items()
+            if st["status"] == "blocked" and st["last_attempt_at"] <= cutoff
+        ]
+        candidates.sort(key=lambda row: row[1])
+        return [{"src_ip": ip, "firewall_id": fw_id} for ip, _, fw_id in candidates[:limit]]
+
+    def list_unblocking_ips_for_retry(self, before_ts, limit):
+        cutoff = _utc(before_ts)
+        candidates = [
+            (ip, st["last_attempt_at"], st.get("firewall_id"))
+            for ip, st in self.state.items()
+            if st["status"] == "unblocking" and st["last_attempt_at"] <= cutoff
+        ]
+        candidates.sort(key=lambda row: row[1])
+        return [{"src_ip": ip, "firewall_id": fw_id} for ip, _, fw_id in candidates[:limit]]
+
 
 class FakeFirewall:
-    def __init__(self, result=None):
+    def __init__(self, result=None, remove_result=None):
         self.calls = []
+        self.remove_calls = []
         self._result = result or DOResult(True, 204, None)
+        self._remove_result = remove_result if remove_result is not None else DOResult(True, 204, None)
 
     def add_deny_rule(self, ip):
         self.calls.append(ip)
         return self._result
+
+    def remove_deny_rule(self, ip, firewall_id=None):
+        self.remove_calls.append((ip, firewall_id))
+        return self._remove_result
 
 
 def _settings(**overrides):
@@ -92,6 +133,7 @@ def _settings(**overrides):
         do_failure_cooldown=60,
         do_max_blocked_ips=1000,
         do_firewall_id="fw-1",
+        do_block_ttl=604800,
     )
     base.update(overrides)
     return types.SimpleNamespace(**base)
@@ -356,3 +398,158 @@ def test_sweep_does_not_rerun_until_next_sweep_at_elapses():
     # _next_sweep_at, must not run the sweep again.
     worker._maybe_sweep_failed_blocks()
     assert fw.calls == ["1.1.1.1", "1.1.1.1"]
+
+
+def test_expiry_sweep_noop_when_ttl_disabled():
+    db = FakeDB()
+    fw = FakeFirewall()
+    logs = []
+    clock_value = [1000.0]
+    worker = MetricsWorker(
+        _settings(do_block_ttl=0),
+        db,
+        fw,
+        log_fn=logs.append,
+        clock=lambda: clock_value[0],
+    )
+
+    called = []
+    db.list_expired_blocked_ips = lambda *a, **k: called.append(1) or []
+
+    worker._next_expiry_sweep_at = 0.0
+    worker._maybe_sweep_expired_blocks()
+
+    assert called == []
+    assert not db.connected
+    assert fw.remove_calls == []
+
+
+def test_expiry_sweep_noop_when_firewall_is_none():
+    db = FakeDB()
+    logs = []
+    clock_value = [1000.0]
+    worker = MetricsWorker(
+        _settings(do_block_ttl=604800),
+        db,
+        None,
+        log_fn=logs.append,
+        clock=lambda: clock_value[0],
+    )
+
+    called = []
+    db.list_expired_blocked_ips = lambda *a, **k: called.append(1) or []
+
+    worker._next_expiry_sweep_at = 0.0
+    worker._maybe_sweep_expired_blocks()
+
+    assert called == []
+
+
+def test_expiry_sweep_removes_expired_ip_and_marks_expired():
+    db = FakeDB()
+    fw = FakeFirewall(remove_result=DOResult(True, 204, None))
+    logs = []
+    clock_value = [1_000_000.0]
+    worker = MetricsWorker(
+        _settings(do_block_ttl=604800, do_retry_interval=300),
+        db,
+        fw,
+        log_fn=logs.append,
+        clock=lambda: clock_value[0],
+    )
+
+    db.state["1.1.1.1"] = {
+        "status": "blocked",
+        "attempts": 1,
+        "last_attempt_at": _utc(clock_value[0] - 604800 - 1),
+        "firewall_id": "fw-9",
+    }
+    db.blocked_ips.add("1.1.1.1")
+    worker._known_blocked.add("1.1.1.1")
+    worker._blocked_count = 1
+
+    worker._next_expiry_sweep_at = 0.0
+    worker._maybe_sweep_expired_blocks()
+
+    assert fw.remove_calls == [("1.1.1.1", "fw-9")]
+    assert db.state["1.1.1.1"]["status"] == "expired"
+    assert "1.1.1.1" not in worker._known_blocked
+    assert worker._blocked_count == 0
+
+
+def test_expiry_sweep_removal_failure_marks_unblocking_and_not_forgotten():
+    db = FakeDB()
+    fw = FakeFirewall(remove_result=DOResult(False, 500, "boom"))
+    logs = []
+    clock_value = [1_000_000.0]
+    worker = MetricsWorker(
+        _settings(do_block_ttl=604800, do_retry_interval=300),
+        db,
+        fw,
+        log_fn=logs.append,
+        clock=lambda: clock_value[0],
+    )
+
+    db.state["1.1.1.1"] = {
+        "status": "blocked",
+        "attempts": 1,
+        "last_attempt_at": _utc(clock_value[0] - 604800 - 1),
+        "firewall_id": "fw-9",
+    }
+    db.blocked_ips.add("1.1.1.1")
+    worker._known_blocked.add("1.1.1.1")
+    worker._blocked_count = 1
+
+    worker._next_expiry_sweep_at = 0.0
+    worker._maybe_sweep_expired_blocks()
+
+    assert fw.remove_calls == [("1.1.1.1", "fw-9")]
+    assert db.state["1.1.1.1"]["status"] == "unblocking"
+    assert "1.1.1.1" in worker._known_blocked
+    assert worker._blocked_count == 1
+
+
+def test_expiry_sweep_retries_unblocking_ip_past_retry_cutoff():
+    db = FakeDB()
+    fw = FakeFirewall(remove_result=DOResult(True, 204, None))
+    logs = []
+    clock_value = [1_000_000.0]
+    worker = MetricsWorker(
+        _settings(do_block_ttl=604800, do_retry_interval=300),
+        db,
+        fw,
+        log_fn=logs.append,
+        clock=lambda: clock_value[0],
+    )
+
+    db.state["2.2.2.2"] = {
+        "status": "unblocking",
+        "attempts": 1,
+        "last_attempt_at": _utc(clock_value[0] - 301),
+        "firewall_id": "fw-9",
+    }
+    db.blocked_ips.add("2.2.2.2")
+    worker._known_blocked.add("2.2.2.2")
+    worker._blocked_count = 1
+
+    worker._next_expiry_sweep_at = 0.0
+    worker._maybe_sweep_expired_blocks()
+
+    assert fw.remove_calls == [("2.2.2.2", "fw-9")]
+    assert db.state["2.2.2.2"]["status"] == "expired"
+    assert "2.2.2.2" not in worker._known_blocked
+    assert worker._blocked_count == 0
+
+
+def test_maybe_block_treats_unblocking_status_like_blocked():
+    db = FakeDB()
+    fw = FakeFirewall()
+    logs = []
+    worker = MetricsWorker(_settings(), db, fw, log_fn=logs.append, clock=lambda: 1000.0)
+
+    db.state["3.3.3.3"] = {"status": "unblocking", "attempts": 1, "last_attempt_at": _utc(1000.0)}
+
+    worker._maybe_block("3.3.3.3", 1000.0)
+
+    assert fw.calls == []
+    assert "3.3.3.3" in worker._known_blocked

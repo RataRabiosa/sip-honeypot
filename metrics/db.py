@@ -93,7 +93,7 @@ class MetricsDB:
 
     def load_blocked_ips(self) -> set:
         with self._conn.cursor() as cur:
-            cur.execute("SELECT src_ip FROM blocked_ips WHERE status='blocked'")
+            cur.execute("SELECT src_ip FROM blocked_ips WHERE status IN ('blocked','unblocking')")
             rows = cur.fetchall()
         return {row["src_ip"] for row in rows}
 
@@ -157,6 +157,55 @@ class MetricsDB:
             )
             rows = cur.fetchall()
         return [row["src_ip"] for row in rows]
+
+    def mark_unblock_pending(self, ip: str, ts: float) -> None:
+        when = _to_naive_utc(ts)
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "UPDATE blocked_ips SET status='unblocking', attempts = attempts + 1, last_attempt_at=%s WHERE src_ip=%s",
+                (when, ip),
+            )
+
+    def mark_unblock_result(self, ip: str, ts: float, ok: bool, http_status, error) -> None:
+        when = _to_naive_utc(ts)
+        with self._conn.cursor() as cur:
+            if ok:
+                cur.execute(
+                    "UPDATE blocked_ips SET status='expired', last_http_status=%s, last_error=NULL, "
+                    "last_attempt_at=%s WHERE src_ip=%s",
+                    (http_status, when, ip),
+                )
+            else:
+                if error is not None:
+                    error = error[:512]
+                cur.execute(
+                    "UPDATE blocked_ips SET last_http_status=%s, last_error=%s WHERE src_ip=%s",
+                    (http_status, error, ip),
+                )
+
+    def list_expired_blocked_ips(self, before_ts: float, limit: int) -> list:
+        cutoff = _to_naive_utc(before_ts)
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT b.src_ip AS src_ip, b.firewall_id AS firewall_id FROM blocked_ips b "
+                "LEFT JOIN source_ips s ON s.src_ip = b.src_ip "
+                "WHERE b.status='blocked' AND GREATEST(b.blocked_at, COALESCE(s.last_seen, b.blocked_at)) <= %s "
+                "ORDER BY b.blocked_at ASC LIMIT %s",
+                (cutoff, int(limit)),
+            )
+            rows = cur.fetchall()
+        return [{"src_ip": row["src_ip"], "firewall_id": row["firewall_id"]} for row in rows]
+
+    def list_unblocking_ips_for_retry(self, before_ts: float, limit: int) -> list:
+        cutoff = _to_naive_utc(before_ts)
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT src_ip, firewall_id FROM blocked_ips WHERE status='unblocking' AND last_attempt_at <= %s "
+                "ORDER BY last_attempt_at ASC LIMIT %s",
+                (cutoff, int(limit)),
+            )
+            rows = cur.fetchall()
+        return [{"src_ip": row["src_ip"], "firewall_id": row["firewall_id"]} for row in rows]
 
     def count_blocked(self) -> int:
         with self._conn.cursor() as cur:

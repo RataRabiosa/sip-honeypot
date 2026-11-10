@@ -557,6 +557,313 @@ def test_doresult_three_arg_call_keeps_firewall_id_none():
     assert result.firewall_id is None
 
 
+def test_remove_deny_rule_removes_ip_present_in_one_managed_rule():
+    managed_rule = {
+        "protocol": "all",
+        "ports": "0",
+        "action": "deny",
+        "sources": {"addresses": ["198.51.100.1", "198.51.100.9", "198.51.100.2"]},
+    }
+    get_body = _firewall_body([managed_rule])
+    server, thread = _make_server(
+        get_response_code=200,
+        get_response_body=_json_bytes(get_body),
+        put_response_code=200,
+        put_response_body=b"",
+    )
+    try:
+        base_url = f"http://127.0.0.1:{server.server_port}"
+        client = DOFirewallClient(TOKEN, "fw-123", base_url=base_url, timeout=5.0)
+        result = client.remove_deny_rule("198.51.100.9")
+
+        assert len(server.requests) == 2
+        put_req = server.requests[1]
+        assert put_req["method"] == "PUT"
+        put_body = put_req["body"]
+        assert put_body["inbound_rules"][0]["sources"]["addresses"] == ["198.51.100.1", "198.51.100.2"]
+
+        assert result.ok is True
+        assert result.http_status == 200
+        assert result.error is None
+        assert result.firewall_id == client.firewall_id
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_remove_deny_rule_removes_ip_across_two_managed_rules():
+    rule_a = {"protocol": "all", "ports": "0", "action": "deny", "sources": {"addresses": ["198.51.100.9"]}}
+    rule_b = {
+        "protocol": "all",
+        "ports": "0",
+        "action": "deny",
+        "sources": {"addresses": ["198.51.100.9", "198.51.100.3"]},
+    }
+    get_body = _firewall_body([rule_a, rule_b])
+    server, thread = _make_server(
+        get_response_code=200,
+        get_response_body=_json_bytes(get_body),
+        put_response_code=200,
+        put_response_body=b"",
+    )
+    try:
+        base_url = f"http://127.0.0.1:{server.server_port}"
+        client = DOFirewallClient(TOKEN, "fw-123", base_url=base_url, timeout=5.0)
+        result = client.remove_deny_rule("198.51.100.9")
+
+        put_body = server.requests[1]["body"]
+        assert put_body["inbound_rules"][0]["sources"]["addresses"] == []
+        assert put_body["inbound_rules"][1]["sources"]["addresses"] == ["198.51.100.3"]
+        assert result.ok is True
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_remove_deny_rule_already_absent_is_noop_no_put():
+    managed_rule = {"protocol": "all", "ports": "0", "action": "deny", "sources": {"addresses": ["198.51.100.1"]}}
+    get_body = _firewall_body([managed_rule])
+    server, thread = _make_server(get_response_code=200, get_response_body=_json_bytes(get_body))
+    try:
+        base_url = f"http://127.0.0.1:{server.server_port}"
+        client = DOFirewallClient(TOKEN, "fw-123", base_url=base_url, timeout=5.0)
+        result = client.remove_deny_rule("198.51.100.99")
+
+        assert len(server.requests) == 1
+        assert server.requests[0]["method"] == "GET"
+        assert result.ok is True
+        assert result.http_status == 200
+        assert result.error is None
+        assert result.firewall_id == client.firewall_id
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+@pytest.mark.parametrize(
+    "firewall",
+    [
+        _malformed_shape_firewall(name=""),
+        _malformed_shape_firewall(name=None),
+        _malformed_shape_firewall(inbound_rules=None),
+        _malformed_shape_firewall(outbound_rules=None),
+    ],
+    ids=["empty-name", "invalid-name", "null-inbound-rules", "null-outbound-rules"],
+)
+def test_remove_deny_rule_handles_malformed_firewall_shape(firewall):
+    get_body = {"firewall": firewall}
+    server, thread = _make_server(get_response_code=200, get_response_body=_json_bytes(get_body))
+    try:
+        base_url = f"http://127.0.0.1:{server.server_port}"
+        client = DOFirewallClient(TOKEN, "fw-123", base_url=base_url, timeout=5.0)
+        result = client.remove_deny_rule("198.51.100.7")
+
+        assert result.ok is False
+        assert (result.error or "").startswith("MALFORMED_FIREWALL_RESPONSE")
+        assert TOKEN not in (result.error or "")
+        assert len(server.requests) == 1
+        assert server.requests[0]["method"] == "GET"
+        assert result.firewall_id == client.firewall_id
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+@pytest.mark.parametrize(
+    "inbound_rules",
+    [
+        [{"protocol": "all", "ports": "0", "action": "deny", "sources": None}],
+        [{"protocol": "all", "ports": "0", "action": "deny", "sources": {"addresses": "not-a-list"}}],
+        [{"protocol": "all", "ports": "0", "action": "deny", "sources": []}],
+    ],
+    ids=["sources-null", "sources-addresses-not-list", "sources-not-a-dict"],
+)
+def test_remove_deny_rule_rejects_malformed_inbound_sources_shape(inbound_rules):
+    get_body = _firewall_body(inbound_rules)
+    server, thread = _make_server(get_response_code=200, get_response_body=_json_bytes(get_body))
+    try:
+        base_url = f"http://127.0.0.1:{server.server_port}"
+        client = DOFirewallClient(TOKEN, "fw-123", base_url=base_url, timeout=5.0)
+        result = client.remove_deny_rule("198.51.100.7")
+
+        assert result.ok is False
+        assert (result.error or "").startswith("MALFORMED_FIREWALL_RESPONSE")
+        assert TOKEN not in (result.error or "")
+        assert len(server.requests) == 1
+        assert server.requests[0]["method"] == "GET"
+        assert result.firewall_id == client.firewall_id
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_remove_deny_rule_rejects_malformed_outbound_destinations_shape():
+    outbound_rule = {
+        "protocol": "all",
+        "ports": "0",
+        "action": "deny",
+        "destinations": {"addresses": None},
+    }
+    get_body = _firewall_body([], outbound_rules=[outbound_rule])
+    server, thread = _make_server(get_response_code=200, get_response_body=_json_bytes(get_body))
+    try:
+        base_url = f"http://127.0.0.1:{server.server_port}"
+        client = DOFirewallClient(TOKEN, "fw-123", base_url=base_url, timeout=5.0)
+        result = client.remove_deny_rule("198.51.100.7")
+
+        assert result.ok is False
+        assert (result.error or "").startswith("MALFORMED_FIREWALL_RESPONSE")
+        assert TOKEN not in (result.error or "")
+        assert len(server.requests) == 1
+        assert server.requests[0]["method"] == "GET"
+        assert result.firewall_id == client.firewall_id
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_remove_deny_rule_handles_get_401_with_json_body():
+    error_body = _json_bytes({"id": "unauthorized", "message": "Unable to authenticate you."})
+    server, thread = _make_server(get_response_code=401, get_response_body=error_body)
+    try:
+        base_url = f"http://127.0.0.1:{server.server_port}"
+        client = DOFirewallClient(TOKEN, "fw-123", base_url=base_url, timeout=5.0)
+        result = client.remove_deny_rule("198.51.100.7")
+
+        assert result.ok is False
+        assert result.http_status == 401
+        assert "Unable to authenticate you" in (result.error or "")
+        assert TOKEN not in (result.error or "")
+        assert len(server.requests) == 1
+        assert server.requests[0]["method"] == "GET"
+        assert result.firewall_id == client.firewall_id
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_remove_deny_rule_handles_put_422():
+    managed_rule = {"protocol": "all", "ports": "0", "action": "deny", "sources": {"addresses": ["198.51.100.7"]}}
+    get_body = _firewall_body([managed_rule])
+    put_error_body = _json_bytes(
+        {"id": "unprocessable_entity", "message": "must have no more than 50 rules", "request_id": "abc"}
+    )
+    server, thread = _make_server(
+        get_response_code=200,
+        get_response_body=_json_bytes(get_body),
+        put_response_code=422,
+        put_response_body=put_error_body,
+    )
+    try:
+        base_url = f"http://127.0.0.1:{server.server_port}"
+        client = DOFirewallClient(TOKEN, "fw-123", base_url=base_url, timeout=5.0)
+        result = client.remove_deny_rule("198.51.100.7")
+
+        assert result.ok is False
+        assert result.http_status == 422
+        assert "must have no more than 50 rules" in (result.error or "")
+        assert TOKEN not in (result.error or "")
+        assert len(server.requests) == 2
+        assert server.requests[0]["method"] == "GET"
+        assert server.requests[1]["method"] == "PUT"
+        assert result.firewall_id == client.firewall_id
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_remove_deny_rule_firewall_id_mismatch_no_http_call():
+    client = DOFirewallClient(TOKEN, "fw-123", base_url="http://127.0.0.1:1", timeout=5.0)
+    result = client.remove_deny_rule("198.51.100.7", firewall_id="fw-999")
+
+    assert result.ok is False
+    assert result.http_status is None
+    assert (result.error or "").startswith("FIREWALL_ID_MISMATCH")
+    assert result.firewall_id == "fw-123"
+
+
+def test_remove_deny_rule_firewall_id_none_behaves_like_single_firewall_call():
+    managed_rule = {"protocol": "all", "ports": "0", "action": "deny", "sources": {"addresses": ["198.51.100.9"]}}
+    get_body = _firewall_body([managed_rule])
+    server, thread = _make_server(
+        get_response_code=200,
+        get_response_body=_json_bytes(get_body),
+        put_response_code=200,
+        put_response_body=b"",
+    )
+    try:
+        base_url = f"http://127.0.0.1:{server.server_port}"
+        client = DOFirewallClient(TOKEN, "fw-123", base_url=base_url, timeout=5.0)
+        result = client.remove_deny_rule("198.51.100.9")
+
+        assert len(server.requests) == 2
+        assert result.ok is True
+        assert result.firewall_id == client.firewall_id
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_remove_deny_rule_firewall_id_matching_calls_through():
+    managed_rule = {"protocol": "all", "ports": "0", "action": "deny", "sources": {"addresses": ["198.51.100.9"]}}
+    get_body = _firewall_body([managed_rule])
+    server, thread = _make_server(
+        get_response_code=200,
+        get_response_body=_json_bytes(get_body),
+        put_response_code=200,
+        put_response_body=b"",
+    )
+    try:
+        base_url = f"http://127.0.0.1:{server.server_port}"
+        client = DOFirewallClient(TOKEN, "fw-123", base_url=base_url, timeout=5.0)
+        result = client.remove_deny_rule("198.51.100.9", firewall_id="fw-123")
+
+        assert len(server.requests) == 2
+        assert result.ok is True
+        assert result.firewall_id == client.firewall_id
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_remove_deny_rule_handles_connection_failure():
+    probe = HTTPServer(("127.0.0.1", 0), _RecordingHandler)
+    closed_port = probe.server_port
+    probe.server_close()
+
+    client = DOFirewallClient(TOKEN, "fw-123", base_url=f"http://127.0.0.1:{closed_port}", timeout=2.0)
+    result = client.remove_deny_rule("198.51.100.7")
+
+    assert result.ok is False
+    assert result.http_status is None
+    assert TOKEN not in (result.error or "")
+    assert result.firewall_id == client.firewall_id
+
+
+def test_plan_removal_does_not_mutate_input_firewall():
+    firewall = {
+        "name": "hp-fw",
+        "droplet_ids": [111],
+        "tags": ["honeypot"],
+        "inbound_rules": [
+            {
+                "protocol": "all",
+                "ports": "0",
+                "action": "deny",
+                "sources": {"addresses": ["198.51.100.1", "198.51.100.2"]},
+            }
+        ],
+        "outbound_rules": [],
+    }
+    before = copy.deepcopy(firewall)
+
+    plan = DOFirewallClient.plan_removal(firewall, "198.51.100.2")
+
+    assert firewall == before
+    assert firewall["inbound_rules"][0]["sources"]["addresses"] == ["198.51.100.1", "198.51.100.2"]
+    assert plan.payload["inbound_rules"][0]["sources"]["addresses"] == ["198.51.100.1"]
+
+
 def test_plan_update_does_not_mutate_input_firewall():
     firewall = {
         "name": "hp-fw",

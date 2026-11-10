@@ -7,6 +7,7 @@ from metrics.doapi import parse_object
 from metrics.doapi import request as _do_request
 
 UpdatePlan = collections.namedtuple("UpdatePlan", "payload already_present error")
+RemovePlan = collections.namedtuple("RemovePlan", "payload already_absent error")
 
 
 class DOFirewallClient:
@@ -197,6 +198,60 @@ class DOFirewallClient:
         }
         return UpdatePlan(payload, False, None)
 
+    @staticmethod
+    def plan_removal(firewall: dict, ip: str) -> "RemovePlan":
+        if not isinstance(firewall, dict):
+            return RemovePlan(None, False, "MALFORMED_FIREWALL_RESPONSE: firewall is not an object")
+        name = firewall.get("name")
+        if not isinstance(name, str) or not name:
+            return RemovePlan(None, False, "MALFORMED_FIREWALL_RESPONSE: missing or invalid 'name'")
+        if not isinstance(firewall.get("inbound_rules"), list):
+            return RemovePlan(None, False, "MALFORMED_FIREWALL_RESPONSE: missing or invalid 'inbound_rules'")
+        if not isinstance(firewall.get("outbound_rules"), list):
+            return RemovePlan(None, False, "MALFORMED_FIREWALL_RESPONSE: missing or invalid 'outbound_rules'")
+
+        for rule in firewall["inbound_rules"]:
+            if not DOFirewallClient.is_managed_rule(rule):
+                continue
+            if DOFirewallClient._managed_rule_shape_error(rule, "sources"):
+                return RemovePlan(
+                    None, False, "MALFORMED_FIREWALL_RESPONSE: invalid 'sources' shape in managed inbound rule"
+                )
+        for rule in firewall["outbound_rules"]:
+            if not DOFirewallClient.is_managed_rule(rule):
+                continue
+            if DOFirewallClient._managed_rule_shape_error(rule, "destinations"):
+                return RemovePlan(
+                    None, False, "MALFORMED_FIREWALL_RESPONSE: invalid 'destinations' shape in managed outbound rule"
+                )
+
+        new_inbound_rules = copy.deepcopy(firewall["inbound_rules"])
+        removed = False
+        for rule in new_inbound_rules:
+            if not DOFirewallClient.is_managed_rule(rule):
+                continue
+            sources = rule.get("sources")
+            if not isinstance(sources, dict):
+                continue
+            addresses = sources.get("addresses")
+            if not isinstance(addresses, list):
+                continue
+            if ip in addresses:
+                addresses[:] = [a for a in addresses if a != ip]
+                removed = True
+
+        if not removed:
+            return RemovePlan(None, True, None)
+
+        payload = {
+            "name": firewall["name"],
+            "droplet_ids": firewall.get("droplet_ids") or [],
+            "tags": firewall.get("tags") or [],
+            "inbound_rules": new_inbound_rules,
+            "outbound_rules": firewall.get("outbound_rules") or [],
+        }
+        return RemovePlan(payload, False, None)
+
     def _request(self, method: str, path: str, body: dict = None):
         """Issue one HTTP request and map results/exceptions.
 
@@ -225,6 +280,32 @@ class DOFirewallClient:
 
         plan = self.plan_update(firewall, ip)
         if plan.already_present:
+            return DOResult(True, res.http_status, None, self._firewall_id)
+        if plan.error is not None:
+            if plan.error.startswith("MALFORMED_FIREWALL_RESPONSE"):
+                return DOResult(False, res.http_status, plan.error, self._firewall_id)
+            return DOResult(False, None, plan.error, self._firewall_id)
+
+        put_status, _put_body, put_error = self._request("PUT", f"/v2/firewalls/{self._firewall_id}", body=plan.payload)
+        if put_error is not None:
+            return DOResult(False, put_status, put_error, self._firewall_id)
+        return DOResult(True, put_status, None, self._firewall_id)
+
+    def remove_deny_rule(self, ip: str, firewall_id: str = None) -> DOResult:
+        if firewall_id is not None and firewall_id != self._firewall_id:
+            return DOResult(
+                False,
+                None,
+                f"FIREWALL_ID_MISMATCH: expected {self._firewall_id!r}, got {firewall_id!r}",
+                self._firewall_id,
+            )
+
+        res, firewall = self.fetch()
+        if not res.ok:
+            return res
+
+        plan = self.plan_removal(firewall, ip)
+        if plan.already_absent:
             return DOResult(True, res.http_status, None, self._firewall_id)
         if plan.error is not None:
             if plan.error.startswith("MALFORMED_FIREWALL_RESPONSE"):

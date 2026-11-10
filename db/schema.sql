@@ -32,9 +32,11 @@ CREATE TABLE IF NOT EXISTS source_ips (
   KEY idx_source_ips_last_seen     (last_seen)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- Migrating an existing deployment (adds TTL-driven unblock states):
+--   ALTER TABLE blocked_ips MODIFY status ENUM('pending','blocked','failed','unblocking','expired') NOT NULL DEFAULT 'pending';
 CREATE TABLE IF NOT EXISTS blocked_ips (
   src_ip           VARCHAR(45)  NOT NULL,
-  status           ENUM('pending','blocked','failed') NOT NULL DEFAULT 'pending',
+  status           ENUM('pending','blocked','failed','unblocking','expired') NOT NULL DEFAULT 'pending',
   attempts         INT UNSIGNED NOT NULL DEFAULT 0,
   first_attempt_at DATETIME(3)  NOT NULL,
   last_attempt_at  DATETIME(3)  NOT NULL,

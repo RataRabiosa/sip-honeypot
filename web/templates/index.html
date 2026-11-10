@@ -38,6 +38,8 @@
   .status-blocked { color: #7bdc7b; font-weight: bold; }
   .status-pending { color: #ffd866; font-weight: bold; }
   .status-failed { color: #ff9b9b; font-weight: bold; }
+  .status-unblocking { color: #9ecbff; font-weight: bold; }
+  .status-expired { color: #b8a6ff; font-weight: bold; }
   footer { padding: 1rem 1.5rem; color: #6b7280; font-size: 0.8rem; }
   h2 { font-size: 1rem; color: #d0d4dc; }
 </style>
@@ -73,6 +75,8 @@
     <div class="card"><div class="n">{{ data.totals.blocked }}</div><div class="l">Blocked</div></div>
     <div class="card"><div class="n">{{ data.totals.failed }}</div><div class="l">Block failures</div></div>
     <div class="card"><div class="n">{{ data.totals.pending }}</div><div class="l">Block pending</div></div>
+    <div class="card"><div class="n">{{ data.totals.unblocking }}</div><div class="l">Unblocking (TTL)</div></div>
+    <div class="card"><div class="n">{{ data.totals.expired }}</div><div class="l">Expired (TTL)</div></div>
   </div>
 
   <div class="charts">
