@@ -1,4 +1,61 @@
 import datetime
+import math
+
+BLOCKED_PAGE_SIZE = 25
+
+
+def _escape_like(term: str) -> str:
+    """Escape MySQL LIKE wildcards in ``term`` using the default ``\\`` escape char."""
+    return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _fetch_blocked(cur, blocked_page: int, blocked_search):
+    """Run the paginated/search-filtered Blocked IPs query.
+
+    Returns a dict with ``blocked``, ``blocked_total``, ``blocked_page`` (clamped),
+    ``blocked_pages``, and ``blocked_search`` (original, unescaped term or None).
+    """
+    where = ""
+    params = []
+    if blocked_search:
+        where = "WHERE src_ip LIKE %s "
+        params.append("%" + _escape_like(blocked_search) + "%")
+
+    if params:
+        cur.execute(f"SELECT COUNT(*) AS n FROM blocked_ips {where}".rstrip(), tuple(params))
+    else:
+        cur.execute("SELECT COUNT(*) AS n FROM blocked_ips")
+    blocked_total = cur.fetchone()["n"]
+    blocked_pages = max(1, math.ceil(blocked_total / BLOCKED_PAGE_SIZE))
+    page = min(max(1, blocked_page), blocked_pages)
+
+    row_params = params + [BLOCKED_PAGE_SIZE, (page - 1) * BLOCKED_PAGE_SIZE]
+    cur.execute(
+        "SELECT src_ip, status, attempts, first_attempt_at, last_attempt_at, blocked_at, last_http_status, last_error "
+        f"FROM blocked_ips {where}ORDER BY COALESCE(blocked_at, last_attempt_at) DESC LIMIT %s OFFSET %s",
+        tuple(row_params),
+    )
+    blocked = [
+        {
+            "src_ip": row["src_ip"],
+            "status": row["status"],
+            "attempts": row["attempts"],
+            "first_attempt_at": row["first_attempt_at"],
+            "last_attempt_at": row["last_attempt_at"],
+            "blocked_at": row["blocked_at"],
+            "last_http_status": row["last_http_status"],
+            "last_error": row["last_error"],
+        }
+        for row in cur.fetchall()
+    ]
+
+    return {
+        "blocked": blocked,
+        "blocked_total": blocked_total,
+        "blocked_page": page,
+        "blocked_pages": blocked_pages,
+        "blocked_search": blocked_search,
+    }
 
 
 def _hourly_labels(hours: int):
@@ -24,7 +81,9 @@ def _daily_labels(start_date: datetime.date, end_date: datetime.date):
     return labels
 
 
-def _range_dashboard_data(conn, start: datetime.date, end: datetime.date) -> dict:
+def _range_dashboard_data(
+    conn, start: datetime.date, end: datetime.date, blocked_page: int = 1, blocked_search=None
+) -> dict:
     cur = conn.cursor()
 
     cur.execute("SELECT COUNT(*) AS n FROM request_events")
@@ -93,23 +152,7 @@ def _range_dashboard_data(conn, start: datetime.date, end: datetime.date) -> dic
         for row in cur.fetchall()
     ]
 
-    cur.execute(
-        "SELECT src_ip, status, attempts, first_attempt_at, last_attempt_at, blocked_at, last_http_status, last_error "
-        "FROM blocked_ips ORDER BY COALESCE(blocked_at, last_attempt_at) DESC LIMIT 200"
-    )
-    blocked = [
-        {
-            "src_ip": row["src_ip"],
-            "status": row["status"],
-            "attempts": row["attempts"],
-            "first_attempt_at": row["first_attempt_at"],
-            "last_attempt_at": row["last_attempt_at"],
-            "blocked_at": row["blocked_at"],
-            "last_http_status": row["last_http_status"],
-            "last_error": row["last_error"],
-        }
-        for row in cur.fetchall()
-    ]
+    blocked_result = _fetch_blocked(cur, blocked_page, blocked_search)
 
     return {
         "mode": "range",
@@ -127,14 +170,18 @@ def _range_dashboard_data(conn, start: datetime.date, end: datetime.date) -> dic
         "timeseries": {"labels": labels, "values": values},
         "methods": methods,
         "top_ips": top_ips,
-        "blocked": blocked,
+        "blocked": blocked_result["blocked"],
+        "blocked_total": blocked_result["blocked_total"],
+        "blocked_page": blocked_result["blocked_page"],
+        "blocked_pages": blocked_result["blocked_pages"],
+        "blocked_search": blocked_result["blocked_search"],
         "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     }
 
 
-def dashboard_data(conn, hours: int = 24, start=None, end=None) -> dict:
+def dashboard_data(conn, hours: int = 24, start=None, end=None, blocked_page: int = 1, blocked_search=None) -> dict:
     if start is not None and end is not None:
-        return _range_dashboard_data(conn, start, end)
+        return _range_dashboard_data(conn, start, end, blocked_page=blocked_page, blocked_search=blocked_search)
 
     cur = conn.cursor()
 
@@ -186,23 +233,7 @@ def dashboard_data(conn, hours: int = 24, start=None, end=None) -> dict:
         for row in cur.fetchall()
     ]
 
-    cur.execute(
-        "SELECT src_ip, status, attempts, first_attempt_at, last_attempt_at, blocked_at, last_http_status, last_error "
-        "FROM blocked_ips ORDER BY COALESCE(blocked_at, last_attempt_at) DESC LIMIT 200"
-    )
-    blocked = [
-        {
-            "src_ip": row["src_ip"],
-            "status": row["status"],
-            "attempts": row["attempts"],
-            "first_attempt_at": row["first_attempt_at"],
-            "last_attempt_at": row["last_attempt_at"],
-            "blocked_at": row["blocked_at"],
-            "last_http_status": row["last_http_status"],
-            "last_error": row["last_error"],
-        }
-        for row in cur.fetchall()
-    ]
+    blocked_result = _fetch_blocked(cur, blocked_page, blocked_search)
 
     return {
         "mode": "hours",
@@ -220,6 +251,10 @@ def dashboard_data(conn, hours: int = 24, start=None, end=None) -> dict:
         "timeseries": {"labels": labels, "values": values},
         "methods": methods,
         "top_ips": top_ips,
-        "blocked": blocked,
+        "blocked": blocked_result["blocked"],
+        "blocked_total": blocked_result["blocked_total"],
+        "blocked_page": blocked_result["blocked_page"],
+        "blocked_pages": blocked_result["blocked_pages"],
+        "blocked_search": blocked_result["blocked_search"],
         "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     }

@@ -18,7 +18,7 @@ def _get_bool(raw, default: bool) -> bool:
     return raw.strip().lower() in ("1", "true", "yes", "on")
 
 
-def _empty_data(hours: int, start=None, end=None) -> dict:
+def _empty_data(hours: int, start=None, end=None, blocked_page: int = 1, blocked_search=None) -> dict:
     mode = "range" if start is not None and end is not None else "hours"
     return {
         "mode": mode,
@@ -37,6 +37,10 @@ def _empty_data(hours: int, start=None, end=None) -> dict:
         "methods": [],
         "top_ips": [],
         "blocked": [],
+        "blocked_total": 0,
+        "blocked_page": blocked_page,
+        "blocked_pages": 1,
+        "blocked_search": blocked_search,
         "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     }
 
@@ -51,6 +55,16 @@ def _clamp_hours(raw) -> int:
     if hours > 720:
         return 720
     return hours
+
+
+def _clamp_page(raw) -> int:
+    try:
+        page = int(raw)
+    except (TypeError, ValueError):
+        return 1
+    if page < 1:
+        return 1
+    return page
 
 
 def _parse_date_range(start_raw, end_raw):
@@ -134,14 +148,20 @@ def create_app() -> Flask:
         else:
             start_date = end_date = None
             hours = _clamp_hours(request.args.get("hours"))
+        page = _clamp_page(request.args.get("page"))
+        search = (request.args.get("q") or "").strip() or None
         conn = None
         try:
             conn = app.config["DB_CONNECT"]()
-            data = dashboard_data(conn, hours=hours, start=start_date, end=end_date)
+            data = dashboard_data(
+                conn, hours=hours, start=start_date, end=end_date, blocked_page=page, blocked_search=search
+            )
             return render_template("index.html", data=data, db_error=None)
         except pymysql.err.Error as e:
             return render_template(
-                "index.html", data=_empty_data(hours, start=start_date, end=end_date), db_error=str(e)
+                "index.html",
+                data=_empty_data(hours, start=start_date, end=end_date, blocked_page=page, blocked_search=search),
+                db_error=str(e),
             )
         finally:
             if conn is not None:

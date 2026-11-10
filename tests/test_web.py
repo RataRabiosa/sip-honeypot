@@ -35,6 +35,7 @@ BLOCKED_ROWS = [
         "last_error": None,
     }
 ]
+BLOCKED_COUNT_ROWS = [{"n": 1}]
 
 
 def _rows_for(sql):
@@ -48,6 +49,8 @@ def _rows_for(sql):
         return TOP_IPS_ROWS
     if "ORDER BY COALESCE" in sql:
         return BLOCKED_ROWS
+    if "COUNT(*) AS n FROM blocked_ips" in sql:
+        return BLOCKED_COUNT_ROWS
     if "FROM source_ips" in sql:
         return DISTINCT_ROWS
     if "WHERE" in sql:
@@ -208,6 +211,69 @@ def test_index_shows_error_banner_on_db_error(monkeypatch):
     resp = client.get("/")
     assert resp.status_code == 200
     assert "connection refused" in resp.get_data(as_text=True)
+
+
+def test_index_blocked_search_filters_by_ip(app_with_fake_db):
+    app, conn = app_with_fake_db
+    client = app.test_client()
+    resp = client.get("/?q=203.0.113")
+    assert resp.status_code == 200
+    blocked_calls = [c for c in conn.calls if "ORDER BY COALESCE" in c[0]]
+    assert blocked_calls
+    sql, params = blocked_calls[0]
+    assert "LIKE" in sql
+    assert params[0] == "%203.0.113%"
+
+
+def test_index_blocked_search_escapes_like_wildcards(app_with_fake_db):
+    app, conn = app_with_fake_db
+    client = app.test_client()
+    resp = client.get("/?q=1.2.3%")
+    assert resp.status_code == 200
+    blocked_calls = [c for c in conn.calls if "ORDER BY COALESCE" in c[0]]
+    assert blocked_calls
+    sql, params = blocked_calls[0]
+    assert "LIKE" in sql
+    assert params[0] == "%1.2.3\\%%"
+
+
+def test_index_blocked_page_param_used_for_offset(app_with_fake_db, monkeypatch):
+    app, conn = app_with_fake_db
+    # Give a big enough total that page 2 is in range (2 of 4 pages at 25/page).
+    monkeypatch.setitem(globals(), "BLOCKED_COUNT_ROWS", [{"n": 100}])
+    client = app.test_client()
+    resp = client.get("/?page=2")
+    assert resp.status_code == 200
+    blocked_calls = [c for c in conn.calls if "ORDER BY COALESCE" in c[0]]
+    assert blocked_calls
+    sql, params = blocked_calls[0]
+    assert params[-2:] == (25, 25)
+
+
+def test_index_invalid_page_defaults_to_1(app_with_fake_db):
+    app, conn = app_with_fake_db
+    client = app.test_client()
+    resp = client.get("/?page=abc")
+    assert resp.status_code == 200
+    blocked_calls = [c for c in conn.calls if "ORDER BY COALESCE" in c[0]]
+    assert blocked_calls
+    assert blocked_calls[0][1][-1] == 0
+
+    conn.calls.clear()
+    resp = client.get("/?page=-5")
+    assert resp.status_code == 200
+    blocked_calls = [c for c in conn.calls if "ORDER BY COALESCE" in c[0]]
+    assert blocked_calls
+    assert blocked_calls[0][1][-1] == 0
+
+
+def test_index_page_beyond_total_clamps_to_last_page(app_with_fake_db):
+    app, conn = app_with_fake_db
+    client = app.test_client()
+    resp = client.get("/?page=50")
+    assert resp.status_code == 200
+    html = resp.get_data(as_text=True)
+    assert "Page 1 of 1" in html
 
 
 def test_healthz_ok(app_with_fake_db):

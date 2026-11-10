@@ -30,6 +30,11 @@
   table { width: 100%; border-collapse: collapse; margin-bottom: 2rem; background: #1b1e27; border: 1px solid #2a2d38; border-radius: 8px; overflow: hidden; }
   th, td { padding: 0.5rem 0.75rem; text-align: left; border-bottom: 1px solid #2a2d38; font-size: 0.85rem; }
   th { background: #22252f; color: #9aa0ad; }
+  .search-form { display: flex; align-items: center; gap: 0.4rem; margin-bottom: 0.75rem; }
+  .search-form input[type="text"] { background: #1b1e27; color: #e6e6e6; border: 1px solid #2a2d38; border-radius: 4px; padding: 0.3rem 0.5rem; font-size: 0.85rem; min-width: 220px; }
+  .search-form button { background: #1b1e27; color: #9ecbff; border: 1px solid #2a2d38; border-radius: 4px; padding: 0.3rem 0.75rem; font-size: 0.85rem; cursor: pointer; }
+  .pagination { margin-top: -0.5rem; margin-bottom: 2rem; font-size: 0.85rem; color: #9aa0ad; }
+  .pagination a { color: #9ecbff; text-decoration: none; margin: 0 0.5rem; }
   .status-blocked { color: #7bdc7b; font-weight: bold; }
   .status-pending { color: #ffd866; font-weight: bold; }
   .status-failed { color: #ff9b9b; font-weight: bold; }
@@ -103,6 +108,14 @@
     </tbody>
   </table>
 
+  <form class="search-form" method="get" action="/">
+    <input type="text" name="q" value="{{ data.blocked_search or '' }}" placeholder="Search banned IP...">
+    <button type="submit">Search</button>
+    {% if data.hours %}<input type="hidden" name="hours" value="{{ data.hours }}">{% endif %}
+    {% if data.start %}<input type="hidden" name="start" value="{{ data.start }}">{% endif %}
+    {% if data.end %}<input type="hidden" name="end" value="{{ data.end }}">{% endif %}
+  </form>
+
   <h2>Blocked IPs</h2>
   <table>
     <thead>
@@ -122,6 +135,15 @@
       {% endfor %}
     </tbody>
   </table>
+  <div class="pagination">
+    Page {{ data.blocked_page }} of {{ data.blocked_pages }} ({{ data.blocked_total }} total)
+    {% if data.blocked_page > 1 %}
+      <a href="/?page={{ data.blocked_page - 1 }}{{ '&q=' + data.blocked_search|urlencode if data.blocked_search else '' }}{{ '&hours=' + data.hours|string if data.hours else '' }}{{ '&start=' + data.start if data.start else '' }}{{ '&end=' + data.end if data.end else '' }}">&laquo; Prev</a>
+    {% endif %}
+    {% if data.blocked_page < data.blocked_pages %}
+      <a href="/?page={{ data.blocked_page + 1 }}{{ '&q=' + data.blocked_search|urlencode if data.blocked_search else '' }}{{ '&hours=' + data.hours|string if data.hours else '' }}{{ '&start=' + data.start if data.start else '' }}{{ '&end=' + data.end if data.end else '' }}">Next &raquo;</a>
+    {% endif %}
+  </div>
 </main>
 <footer>SIP Honeypot &mdash; dashboard data refreshes on page load.</footer>
 
